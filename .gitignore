@@ -1,0 +1,24 @@
+# User credentials and local settings
+/config.json
+/config.ps1
+/.env
+/.env.*
+
+# Runtime state, logs, and temporary files
+/logs/
+/state.json
+/state.json.tmp
+/boot-log*.txt
+/telegram-send-*.py
+*.log
+*.tmp
+
+# Installer migration markers
+/.telegram-*-config-created
+
+# Editor and operating-system files
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

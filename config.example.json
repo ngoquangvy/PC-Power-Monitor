@@ -1,0 +1,4 @@
+{
+  "telegramBotToken": "123456789:PUT_YOUR_BOT_TOKEN_HERE",
+  "telegramChatId": "PUT_YOUR_CHAT_ID_HERE"
+}
