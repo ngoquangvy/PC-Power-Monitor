@@ -104,6 +104,18 @@ if ($Console) {
 try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class TelegramPowerMonitorSettingsWindow {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Telegram Power Monitor - Settings"
@@ -113,6 +125,13 @@ try {
     $form.MinimizeBox = $false
     $form.StartPosition = "CenterScreen"
     $form.TopMost = $true
+    $form.Add_Shown({
+        # The tray launches PowerShell with its console hidden. Explicitly show the
+        # WinForms window so the SW_HIDE startup flag does not hide Settings too.
+        [void][TelegramPowerMonitorSettingsWindow]::ShowWindow($form.Handle, 5)
+        [void][TelegramPowerMonitorSettingsWindow]::SetForegroundWindow($form.Handle)
+        $form.Activate()
+    })
 
     $title = New-Object System.Windows.Forms.Label
     $title.Text = "Telegram connection"
@@ -192,7 +211,16 @@ try {
     if ($result -ne [System.Windows.Forms.DialogResult]::OK) { exit 1 }
     exit 0
 } catch {
-    Write-Warning "Settings form could not be opened; using terminal input instead."
-    Invoke-ConsoleSetup
-    exit 0
+    try {
+        Write-TelegramLog -ScriptDir $ScriptDir -Message "SETTINGS_ERROR Type=$($_.Exception.GetType().Name)" -RetentionDays 5
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Telegram Settings could not be opened. Run setup-config.ps1 -Console to edit settings in a terminal.",
+            "Telegram Power Monitor",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+    } catch {
+        Write-Warning "Settings form could not be opened. Run setup-config.ps1 -Console."
+    }
+    exit 1
 }

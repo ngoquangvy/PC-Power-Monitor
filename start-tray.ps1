@@ -76,7 +76,7 @@ $statusItem.Add_Click({
 })
 
 $settingsItem.Add_Click({
-    Start-HiddenPowerShell "-NoProfile -ExecutionPolicy Bypass -File `"$SettingsScript`""
+    Start-HiddenPowerShell "-NoProfile -STA -ExecutionPolicy Bypass -File `"$SettingsScript`""
 })
 
 $testItem.Add_Click({
