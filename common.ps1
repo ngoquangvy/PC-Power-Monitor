@@ -296,11 +296,34 @@ function Set-TelegramLogTaskState {
         [string]$State
     )
 
+    $failedTasks = @()
     foreach ($task in $TelegramLogTaskNames) {
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         & schtasks.exe /Change /TN $task "/$State" 2>&1 | Out-Null
+        $changeExitCode = $LASTEXITCODE
+        if ($State -eq "DISABLE") {
+            # Disabling prevents future starts; explicitly end the long-running
+            # watcher (and any short sender currently active) as well.
+            & schtasks.exe /End /TN $task 2>&1 | Out-Null
+        }
         $ErrorActionPreference = $oldErrorActionPreference
+        if ($changeExitCode -ne 0) { $failedTasks += $task }
+    }
+
+    if ($failedTasks.Count -gt 0) {
+        throw "Could not change Scheduled Task state: $($failedTasks -join ', ')"
+    }
+
+    if ($State -eq "ENABLE") {
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & schtasks.exe /Run /TN $TelegramLogTaskNames[2] 2>&1 | Out-Null
+        $runExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($runExitCode -ne 0) {
+            throw "Tasks were enabled, but the power watcher could not be started."
+        }
     }
 }
 

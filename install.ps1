@@ -28,12 +28,13 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StagingConfigPath = Join-Path $ScriptDir "config.json"
 $LegacyConfigPath = Join-Path $ScriptDir "config.ps1"
 $SetupScript = Join-Path $ScriptDir "setup-config.ps1"
+$ManageTasksScript = Join-Path $ScriptDir "manage-tasks.ps1"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $WatchScript = Join-Path $ScriptDir "watch-power.ps1"
 $TrayScript = Join-Path $ScriptDir "start-tray.ps1"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $SetupScript)) {
+foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $SetupScript, $ManageTasksScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Missing required file: $requiredFile"
     }

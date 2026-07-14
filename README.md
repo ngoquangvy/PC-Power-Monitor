@@ -34,6 +34,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\setup-config.ps1" -Consol
 
 Muốn sửa về sau, nhấp phải biểu tượng Telegram Power Monitor ở khay hệ thống và chọn **Telegram settings...**. Không cần cài lại task sau khi chỉ đổi token hoặc Chat ID.
 
+Các mục chính trong menu khay:
+
+- **Status**: mở trạng thái task và log gần nhất.
+- **Telegram settings...**: sửa token/Chat ID trong form, không hiện console.
+- **Send test message**: gửi một tin thử và báo lại kết quả.
+- **Enable/Disable scheduled tasks**: yêu cầu UAC, bật/tắt toàn bộ task và khởi động/dừng watcher tương ứng. Hai mục này bị vô hiệu hóa nếu task chưa được cài đủ.
+- **Install / repair tasks** và **Uninstall tasks**: mở trình cài/gỡ có cửa sổ để người dùng xem kết quả.
+- **Open log**, **Open folder** và **Exit tray**: mở log, thư mục app hoặc chỉ thoát biểu tượng khay.
+
 Cài bằng PowerShell:
 
 ```powershell

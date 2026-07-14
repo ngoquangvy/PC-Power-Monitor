@@ -9,9 +9,10 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $StatusScript = Join-Path $ScriptDir "status.ps1"
-$InstallScript = Join-Path $ScriptDir "install.ps1"
-$UninstallScript = Join-Path $ScriptDir "uninstall.ps1"
 $SettingsScript = Join-Path $ScriptDir "setup-config.ps1"
+$ManageTasksScript = Join-Path $ScriptDir "manage-tasks.ps1"
+$InstallCmd = Join-Path $ScriptDir "INSTALL.cmd"
+$UninstallCmd = Join-Path $ScriptDir "UNINSTALL.cmd"
 $LogDirectory = Get-TelegramLogDirectory -ScriptDir $ScriptDir
 $StatePath = Join-Path $ScriptDir "state.json"
 
@@ -25,6 +26,40 @@ function Start-VisiblePowerShell {
     param([string]$ArgumentLine)
 
     Start-Process -FilePath $PowerShell -ArgumentList $ArgumentLine | Out-Null
+}
+
+function Show-TrayMessage {
+    param([string]$Text, [string]$Title = "Telegram Power Monitor", [switch]$ErrorMessage)
+
+    $icon = if ($ErrorMessage) { [System.Windows.Forms.MessageBoxIcon]::Error } else { [System.Windows.Forms.MessageBoxIcon]::Information }
+    [void][System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $icon)
+}
+
+function Show-TrayBalloon {
+    param([string]$Text)
+
+    $notifyIcon.BalloonTipTitle = "Telegram Power Monitor"
+    $notifyIcon.BalloonTipText = $Text
+    $notifyIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+    $notifyIcon.ShowBalloonTip(4000)
+}
+
+function Invoke-ElevatedTaskState {
+    param([ValidateSet("ENABLE", "DISABLE")][string]$State)
+
+    if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
+        Show-TrayMessage -Text "Scheduled Tasks are not fully installed. Run Install / repair tasks first." -ErrorMessage
+        return
+    }
+
+    $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ManageTasksScript`" -State $State"
+    $process = Start-Process -FilePath $PowerShell -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Windows could not change the Scheduled Task state."
+    }
+    Update-TrayText
+    $resultText = if ($State -eq "ENABLE") { "Scheduled Tasks enabled; power watcher started." } else { "Scheduled Tasks disabled; running watcher stopped." }
+    Show-TrayBalloon -Text $resultText
 }
 
 function Get-InternetStatusText {
@@ -72,48 +107,60 @@ $menu.Items.Add("-") | Out-Null
 $exitItem = $menu.Items.Add("Exit tray")
 
 $statusItem.Add_Click({
-    Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$StatusScript`""
+    try { Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$StatusScript`"" }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $settingsItem.Add_Click({
-    Start-HiddenPowerShell "-NoProfile -STA -ExecutionPolicy Bypass -File `"$SettingsScript`""
+    try { Start-HiddenPowerShell "-NoProfile -STA -ExecutionPolicy Bypass -File `"$SettingsScript`"" }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $testItem.Add_Click({
-    Start-HiddenPowerShell "-NoProfile -ExecutionPolicy Bypass -File `"$SendScript`" -Reason tray-test"
+    try {
+        $process = Start-Process -FilePath $PowerShell -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$SendScript`" -Reason tray-test" -WindowStyle Hidden -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "Telegram test message could not be sent. Check Status and the latest log." }
+        Update-TrayText
+        Show-TrayBalloon -Text "Telegram test message sent successfully."
+    } catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $enableItem.Add_Click({
-    Set-TelegramLogTaskState -State ENABLE
-    Update-TrayText
+    try { Invoke-ElevatedTaskState -State ENABLE }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $disableItem.Add_Click({
-    Set-TelegramLogTaskState -State DISABLE
-    Update-TrayText
+    try { Invoke-ElevatedTaskState -State DISABLE }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $installItem.Add_Click({
-    Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -File `"$InstallScript`""
+    try { Start-Process -FilePath $InstallCmd | Out-Null }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $uninstallItem.Add_Click({
-    Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -File `"$UninstallScript`""
+    try { Start-Process -FilePath $UninstallCmd | Out-Null }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $openLogItem.Add_Click({
-    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
-    $latestLog = Get-ChildItem -LiteralPath $LogDirectory -File -Filter "*.log" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($latestLog) {
-        Start-Process notepad.exe -ArgumentList "`"$($latestLog.FullName)`"" | Out-Null
-    } else {
-        Start-Process explorer.exe -ArgumentList "`"$LogDirectory`"" | Out-Null
-    }
+    try {
+        New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+        $latestLog = Get-ChildItem -LiteralPath $LogDirectory -File -Filter "*.log" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latestLog) {
+            Start-Process notepad.exe -ArgumentList "`"$($latestLog.FullName)`"" | Out-Null
+        } else {
+            Start-Process explorer.exe -ArgumentList "`"$LogDirectory`"" | Out-Null
+        }
+    } catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $openFolderItem.Add_Click({
-    Start-Process explorer.exe -ArgumentList "`"$ScriptDir`"" | Out-Null
+    try { Start-Process explorer.exe -ArgumentList "`"$ScriptDir`"" | Out-Null }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
 $exitItem.Add_Click({
@@ -123,6 +170,13 @@ $exitItem.Add_Click({
 })
 
 $notifyIcon.ContextMenuStrip = $menu
+$menu.Add_Opening({
+    $tasksReady = ((Get-TelegramLogInstalledTaskCount) -eq $TelegramLogTaskNames.Count)
+    $enableItem.Enabled = $tasksReady
+    $disableItem.Enabled = $tasksReady
+    $enableItem.Text = if ($tasksReady) { "Enable scheduled tasks" } else { "Enable scheduled tasks (install first)" }
+    $disableItem.Text = if ($tasksReady) { "Disable scheduled tasks" } else { "Disable scheduled tasks (install first)" }
+})
 $notifyIcon.Add_DoubleClick({
     Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$StatusScript`""
 })
