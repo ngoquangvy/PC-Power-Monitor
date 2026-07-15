@@ -153,7 +153,10 @@ function Send-TelegramNotification {
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-RestMethod -Method Post -Uri $uri -Body $body -TimeoutSec 8 | Out-Null
+        $telegramResponse = Invoke-RestMethod -Method Post -Uri $uri -Body $body -TimeoutSec 8
+        if ($telegramResponse.ok -ne $true) {
+            throw "Telegram API did not confirm the message."
+        }
         $State.internetOnline = $true
         $State.lastSuccessfulSend = (Get-Date).ToString("o")
         Write-LocalLog "SEND_OK Event=$EventName"

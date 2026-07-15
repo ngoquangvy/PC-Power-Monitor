@@ -74,6 +74,8 @@ Watcher chạy ẩn trong phiên người dùng tương tác để Windows tính
 - Còn khoảng 10 giây: gửi một tin pre-sleep rồi xác nhận sleep có thật sự xảy ra.
 - Nếu máy không sleep: chờ một bộ đếm Windows mới, không gửi lặp theo chuột/phím.
 
+Watcher đồng thời đăng ký `PowerRegisterSuspendResumeNotification`. Khi nhận `PBT_APMSUSPEND`, callback chỉ chụp trạng thái lần gửi đã hoàn tất, không thực hiện mạng trong khoảng suspend ngắn. Sau khi resume, log và màn hình **Status** hiển thị `PreSleepTelegramConfirmed=True/False`. `True` nghĩa là Telegram API đã trả thành công trước tín hiệu suspend; `False` nghĩa là lần pre-sleep đó đã bị bỏ lỡ.
+
 ## Kiểm tra
 
 Xem task, trạng thái notification và log gần nhất:
@@ -86,6 +88,12 @@ Probe power state một lần, không gửi Telegram:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\watch-power.ps1" -ProbeOnce
+```
+
+Kiểm tra máy có đăng ký được callback suspend hay không, không đưa máy vào sleep:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\watch-power.ps1" -ProbeSuspendAudit
 ```
 
 Gửi test thủ công:

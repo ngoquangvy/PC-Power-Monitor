@@ -8,7 +8,9 @@ param(
     [ValidateRange(1, 365)]
     [int]$LogRetentionDays = 5,
 
-    [switch]$ProbeOnce
+    [switch]$ProbeOnce,
+
+    [switch]$ProbeSuspendAudit
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +22,7 @@ $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $watcherMutex = New-Object System.Threading.Mutex($false, "Local\TelegramPowerMonitorWatcher")
 $hasWatcherLock = $false
+$suspendAuditRegistered = $false
 
 function Write-WatcherLog {
     param([string]$Message)
@@ -32,6 +35,7 @@ function Initialize-PowerApi {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace TelegramPowerMonitor {
     public static class NativePower {
@@ -57,6 +61,15 @@ namespace TelegramPowerMonitor {
             public byte SystemStatusFlag;
             public uint BatteryLifeTime;
             public uint BatteryFullLifeTime;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate uint DEVICE_NOTIFY_CALLBACK_ROUTINE(IntPtr context, uint type, IntPtr setting);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+            public DEVICE_NOTIFY_CALLBACK_ROUTINE Callback;
+            public IntPtr Context;
         }
 
         [DllImport("powrprof.dll", EntryPoint="CallNtPowerInformation")]
@@ -96,6 +109,33 @@ namespace TelegramPowerMonitor {
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr LocalFree(IntPtr memory);
+
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerRegisterSuspendResumeNotification(uint flags,
+            ref DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS recipient, out IntPtr registrationHandle);
+
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerUnregisterSuspendResumeNotification(IntPtr registrationHandle);
+
+        private static DEVICE_NOTIFY_CALLBACK_ROUTINE suspendCallback;
+        private static DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS suspendSubscription;
+        private static IntPtr suspendRegistration = IntPtr.Zero;
+        private static long suspendSequence;
+        private static int currentCycleSendSucceeded;
+        private static int lastSuspendHadSuccessfulSend;
+        private static long lastSuspendUtcFileTime;
+
+        private static uint OnSuspendResumeNotification(IntPtr context, uint type, IntPtr setting) {
+            // PBT_APMSUSPEND. Do no I/O here: Windows gives applications only a
+            // very small suspend window. Snapshot the already-completed send.
+            if (type == 4) {
+                Interlocked.Exchange(ref lastSuspendHadSuccessfulSend,
+                    Volatile.Read(ref currentCycleSendSucceeded));
+                Interlocked.Exchange(ref lastSuspendUtcFileTime, DateTime.UtcNow.ToFileTimeUtc());
+                Interlocked.Increment(ref suspendSequence);
+            }
+            return 0;
+        }
 
         public static SYSTEM_POWER_INFORMATION GetSystemPowerInformation(out uint status) {
             SYSTEM_POWER_INFORMATION value;
@@ -152,6 +192,52 @@ namespace TelegramPowerMonitor {
             } finally {
                 LocalFree(schemePointer);
             }
+        }
+
+        public static bool RegisterSuspendAudit(out uint status) {
+            if (suspendRegistration != IntPtr.Zero) {
+                status = 0;
+                return true;
+            }
+            suspendCallback = OnSuspendResumeNotification;
+            suspendSubscription = new DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+                Callback = suspendCallback,
+                Context = IntPtr.Zero
+            };
+            status = PowerRegisterSuspendResumeNotification(2, ref suspendSubscription, out suspendRegistration);
+            return status == 0 && suspendRegistration != IntPtr.Zero;
+        }
+
+        public static uint UnregisterSuspendAudit() {
+            if (suspendRegistration == IntPtr.Zero) return 0;
+            uint status = PowerUnregisterSuspendResumeNotification(suspendRegistration);
+            suspendRegistration = IntPtr.Zero;
+            return status;
+        }
+
+        public static void SetCurrentCycleSendSucceeded(bool succeeded) {
+            Volatile.Write(ref currentCycleSendSucceeded, succeeded ? 1 : 0);
+        }
+
+        public static long GetSuspendSequence() {
+            return Interlocked.Read(ref suspendSequence);
+        }
+
+        public static bool GetLastSuspendHadSuccessfulSend() {
+            return Volatile.Read(ref lastSuspendHadSuccessfulSend) != 0;
+        }
+
+        public static long GetLastSuspendUtcFileTime() {
+            return Interlocked.Read(ref lastSuspendUtcFileTime);
+        }
+
+        public static bool TestSuspendAuditSnapshot() {
+            long before = GetSuspendSequence();
+            SetCurrentCycleSendSucceeded(true);
+            OnSuspendResumeNotification(IntPtr.Zero, 4, IntPtr.Zero);
+            bool passed = GetSuspendSequence() == before + 1 && GetLastSuspendHadSuccessfulSend();
+            SetCurrentCycleSendSucceeded(false);
+            return passed;
         }
     }
 }
@@ -226,10 +312,24 @@ function Invoke-PreSleepNotification {
 
 try {
     Initialize-PowerApi
-    $hasWatcherLock = $watcherMutex.WaitOne(0)
-    if (-not $hasWatcherLock) {
-        if (-not $ProbeOnce) { Write-WatcherLog "WATCHER_SKIP Another watcher instance is already running" }
-        exit 0
+    if (-not $ProbeOnce -and -not $ProbeSuspendAudit) {
+        $hasWatcherLock = $watcherMutex.WaitOne(0)
+        if (-not $hasWatcherLock) {
+            Write-WatcherLog "WATCHER_SKIP Another watcher instance is already running"
+            exit 0
+        }
+    }
+
+    if ($ProbeSuspendAudit) {
+        $auditStatus = [uint32]0
+        $registered = [TelegramPowerMonitor.NativePower]::RegisterSuspendAudit([ref]$auditStatus)
+        [pscustomobject]@{
+            Registered = $registered
+            Status = $auditStatus
+            SnapshotTestPassed = [TelegramPowerMonitor.NativePower]::TestSuspendAuditSnapshot()
+        } | Format-List
+        if ($registered) { [void][TelegramPowerMonitor.NativePower]::UnregisterSuspendAudit() }
+        exit $(if ($registered) { 0 } else { 1 })
     }
 
     if ($ProbeOnce) {
@@ -237,12 +337,32 @@ try {
         exit 0
     }
 
+    $auditStatus = [uint32]0
+    $suspendAuditRegistered = [TelegramPowerMonitor.NativePower]::RegisterSuspendAudit([ref]$auditStatus)
+    if ($suspendAuditRegistered) {
+        Write-WatcherLog "SUSPEND_AUDIT_REGISTERED Provider=PBT_APMSUSPEND"
+    } else {
+        Write-WatcherLog "SUSPEND_AUDIT_ERROR Status=$auditStatus"
+    }
+
     Write-WatcherLog "WATCHER_STARTED PreSleepSeconds=$PreSleepSeconds MaxProbeIntervalSeconds=$MaxProbeIntervalSeconds"
     $armed = $true
     $cooldownUntil = [datetimeoffset]::MinValue
     $lastTimerSource = $null
+    $lastSuspendSequence = [TelegramPowerMonitor.NativePower]::GetSuspendSequence()
+    [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
 
     while ($true) {
+        $suspendSequence = [TelegramPowerMonitor.NativePower]::GetSuspendSequence()
+        if ($suspendSequence -ne $lastSuspendSequence) {
+            $confirmed = [TelegramPowerMonitor.NativePower]::GetLastSuspendHadSuccessfulSend()
+            $suspendFileTime = [TelegramPowerMonitor.NativePower]::GetLastSuspendUtcFileTime()
+            $suspendTime = if ($suspendFileTime -gt 0) { [DateTime]::FromFileTimeUtc($suspendFileTime).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz") } else { "Unknown" }
+            Write-WatcherLog "SUSPEND_AUDIT Sequence=$suspendSequence PreSleepTelegramConfirmed=$confirmed SuspendSignalTime=$suspendTime"
+            [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
+            $lastSuspendSequence = $suspendSequence
+        }
+
         $power = Get-WindowsPowerCountdown
         if ($power.TimerSource -ne $lastTimerSource) {
             Write-WatcherLog "POWER_TIMER_SOURCE Source=$($power.TimerSource) SleepTimeoutSeconds=$($power.SleepTimeoutSeconds) InteractiveSession=$($power.InteractiveSession)"
@@ -255,7 +375,10 @@ try {
         }
 
         if (-not $power.TimerActive -or $power.SystemOrDisplayRequired) {
-            if ([datetimeoffset]::Now -ge $cooldownUntil) { $armed = $true }
+            if ([datetimeoffset]::Now -ge $cooldownUntil) {
+                if (-not $armed) { [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false) }
+                $armed = $true
+            }
             Start-Sleep -Seconds ([math]::Min(30, $MaxProbeIntervalSeconds))
             continue
         }
@@ -264,6 +387,7 @@ try {
         if (-not $armed) {
             if ([datetimeoffset]::Now -ge $cooldownUntil -and $remaining -gt ($PreSleepSeconds + 30)) {
                 $armed = $true
+                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
             } else {
                 Start-Sleep -Seconds ([math]::Min(30, [math]::Max(1, $remaining)))
                 continue
@@ -274,6 +398,7 @@ try {
             $cycleId = [guid]::NewGuid().ToString("N")
             $sleepCounterBefore = Get-LastSleepCounter
             $exitCode = Invoke-PreSleepNotification -SecondsRemaining $remaining -CycleId $cycleId
+            [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($exitCode -eq 0)
             Write-WatcherLog "PRE_SLEEP_ATTEMPT Cycle=$cycleId RemainingSeconds=$remaining SendExitCode=$exitCode"
             $armed = $false
             $cooldownUntil = [datetimeoffset]::Now.AddSeconds(60)
@@ -296,6 +421,9 @@ try {
     Write-WatcherLog "WATCHER_ERROR $($_.Exception.Message)"
     exit 1
 } finally {
+    if ($suspendAuditRegistered) {
+        try { [void][TelegramPowerMonitor.NativePower]::UnregisterSuspendAudit() } catch {}
+    }
     if ($hasWatcherLock) {
         try { $watcherMutex.ReleaseMutex() } catch {}
     }

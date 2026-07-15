@@ -38,6 +38,17 @@ if (Test-Path -LiteralPath $StatePath) {
 
 $LogDirectory = Get-TelegramLogDirectory -ScriptDir $ScriptDir
 if (Test-Path -LiteralPath $LogDirectory) {
+    $lastSuspendAudit = Get-ChildItem -LiteralPath $LogDirectory -File -Filter "*.log" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        ForEach-Object { Select-String -LiteralPath $_.FullName -Pattern "SUSPEND_AUDIT Sequence=" -ErrorAction SilentlyContinue | Select-Object -Last 1 } |
+        Select-Object -First 1
+    Write-Host ""
+    if ($lastSuspendAudit) {
+        Write-Host "Last suspend verification: $($lastSuspendAudit.Line)"
+    } else {
+        Write-Host "Last suspend verification: none recorded yet"
+    }
+
     $latestLog = Get-ChildItem -LiteralPath $LogDirectory -File -Filter "*.log" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($latestLog) {
