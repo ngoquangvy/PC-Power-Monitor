@@ -1,11 +1,13 @@
 param(
-    [ValidateSet("monitor-start", "startup", "resume", "pre-sleep", "sleep-transition", "manual-test", "tray-test")]
+    [ValidateSet("monitor-start", "startup", "resume", "pre-sleep", "manual-test", "tray-test")]
     [string]$Reason = "manual-test",
 
     [ValidateRange(0, 300)]
     [int]$RemainingSeconds = 0,
 
     [string]$CycleId,
+
+    [uint32]$ExpectedLastInputTick = 0,
 
     [ValidateRange(1, 365)]
     [int]$LogRetentionDays = 5
@@ -24,6 +26,38 @@ $hasStateLock = $false
 function Write-LocalLog {
     param([string]$Message)
     Write-TelegramLog -ScriptDir $ScriptDir -Message $Message -RetentionDays $LogRetentionDays
+}
+
+function Get-CurrentLastInputTick {
+    if (-not ("TelegramPowerMonitor.LastInputProbe" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace TelegramPowerMonitor {
+    public static class LastInputProbe {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LASTINPUTINFO {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool GetLastInputInfo(ref LASTINPUTINFO input);
+
+        public static uint GetLastInputTick() {
+            LASTINPUTINFO input = new LASTINPUTINFO();
+            input.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+            if (!GetLastInputInfo(ref input)) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return input.dwTime;
+        }
+    }
+}
+'@
+    }
+    return [TelegramPowerMonitor.LastInputProbe]::GetLastInputTick()
 }
 
 function Add-StateProperty {
@@ -54,8 +88,6 @@ function Read-State {
     Add-StateProperty $state "lastResumeNotificationAt" $null
     Add-StateProperty $state "lastPreSleepCycleId" $null
     Add-StateProperty $state "lastPreSleepNotificationAt" $null
-    Add-StateProperty $state "lastNotifiedSleepTransitionEventId" $null
-    Add-StateProperty $state "lastSleepTransitionNotificationAt" $null
     Add-StateProperty $state "lastCheckAt" $null
 
     # Retired fields are retained for backward-compatible state loading but cannot suppress new event types.
@@ -139,21 +171,6 @@ function Get-BootIdentity {
             Time = [datetimeoffset]$os.LastBootUpTime
             IsHibernateResume = $false
         }
-    }
-}
-
-function Get-SleepTransitionEvent {
-    $filterXml = @"
-<QueryList>
-  <Query Id="0" Path="System">
-    <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=566]] and *[EventData[Data[@Name='Reason']='20' and Data[@Name='PreviousSessionType']='1' and Data[@Name='NextSessionType']='3']]</Select>
-  </Query>
-</QueryList>
-"@
-    $event = Get-WinEvent -FilterXml $filterXml -MaxEvents 1 -ErrorAction Stop
-    return [pscustomobject]@{
-        RecordId = [string]$event.RecordId
-        Time = [datetimeoffset]$event.TimeCreated
     }
 }
 
@@ -278,44 +295,25 @@ try {
             exit 0
         }
 
+        if ($ExpectedLastInputTick -ne 0) {
+            $currentLastInputTick = Get-CurrentLastInputTick
+            if ($currentLastInputTick -ne $ExpectedLastInputTick) {
+                Write-LocalLog "PRE_SLEEP_SEND_SKIP InputChanged ExpectedLastInputTick=$ExpectedLastInputTick CurrentLastInputTick=$currentLastInputTick"
+                Write-State $state
+                exit 2
+            }
+        }
+
         $message = @(
             "PC is approaching automatic sleep",
             "Computer: $($snapshot.Computer)",
             "Windows power timer remaining: about $RemainingSeconds seconds",
             "Time: $($snapshot.Time)",
-            "Status: no active system blocker was reported by the Windows sleep countdown"
+            "Status: interactive input remained idle during the final countdown recheck"
         )
         Send-TelegramNotification -State $state -MessageLines $message -EventName "pre-sleep-$CycleId"
         $state.lastPreSleepCycleId = $CycleId
         $state.lastPreSleepNotificationAt = (Get-Date).ToString("o")
-        Write-State $state
-        exit 0
-    }
-
-    if ($Reason -eq "sleep-transition") {
-        $transition = Get-SleepTransitionEvent
-        $eventAgeSeconds = ([datetimeoffset]::Now - $transition.Time).TotalSeconds
-        if ($eventAgeSeconds -gt 20 -or $eventAgeSeconds -lt -5) {
-            Write-LocalLog "SLEEP_TRANSITION_SKIP StaleEvent RecordId=$($transition.RecordId) AgeSeconds=$([math]::Round($eventAgeSeconds, 1))"
-            Write-State $state
-            exit 0
-        }
-        if ($state.lastNotifiedSleepTransitionEventId -eq $transition.RecordId) {
-            Write-State $state
-            exit 0
-        }
-
-        $message = @(
-            "Windows is entering automatic sleep",
-            "Computer: $($snapshot.Computer)",
-            "Transition time: $($transition.Time.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz'))",
-            "Notification time: $($snapshot.Time)",
-            "Status: Windows committed to an active-to-sleep power transition"
-        )
-        Send-TelegramNotification -State $state -MessageLines $message -EventName "sleep-transition-$($transition.RecordId)"
-        $state.lastNotifiedSleepTransitionEventId = $transition.RecordId
-        $state.lastSleepTransitionNotificationAt = (Get-Date).ToString("o")
-        $state.lastPreSleepNotificationAt = $state.lastSleepTransitionNotificationAt
         Write-State $state
         exit 0
     }

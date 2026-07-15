@@ -211,8 +211,6 @@ try {
     Remove-TelegramLogTasks
 
     $resumeEventQuery = "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"
-    $sleepTransitionQuery = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=566]] and *[EventData[Data[@Name='Reason']='20' and Data[@Name='PreviousSessionType']='1' and Data[@Name='NextSessionType']='3']]"
-
     Register-PowerMonitorTask `
         -Name $TelegramLogTaskNames[0] `
         -Description "Send one Telegram notification after Windows starts." `
@@ -232,7 +230,7 @@ try {
 
     Register-PowerMonitorTask `
         -Name $TelegramLogTaskNames[2] `
-        -Description "Monitor the Windows sleep countdown and interactive-session idle fallback." `
+        -Description "Predict sleep from interactive input idle, recheck input before notification, and restart the cycle if sleep does not occur." `
         -ScriptPath $WatchScript `
         -ScriptArguments "-PreSleepSeconds $PreSleepSeconds -MaxProbeIntervalSeconds $MaxProbeIntervalSeconds -LogRetentionDays $LogRetentionDays" `
         -TriggerType LogonAndEvent `
@@ -240,15 +238,6 @@ try {
         -DelaySeconds 45 `
         -LongRunning `
         -InteractiveUserSid $SettingsUserSid
-
-    Register-PowerMonitorTask `
-        -Name $TelegramLogTaskNames[3] `
-        -Description "Send Telegram only when Windows commits to the active-to-sleep transition." `
-        -ScriptPath $SendScript `
-        -ScriptArguments "-Reason sleep-transition -LogRetentionDays $LogRetentionDays" `
-        -TriggerType Event `
-        -EventSubscription $sleepTransitionQuery `
-        -NoRestart
 
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."

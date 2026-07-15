@@ -20,7 +20,6 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
-$StatePath = Join-Path $ScriptDir "state.json"
 $watcherMutex = New-Object System.Threading.Mutex($false, "Local\TelegramPowerMonitorWatcher")
 $hasWatcherLock = $false
 $suspendAuditRegistered = $false
@@ -169,6 +168,17 @@ namespace TelegramPowerMonitor {
             return unchecked(currentTick - input.dwTime) / 1000;
         }
 
+        public static uint GetLastInputTick(out uint status) {
+            LASTINPUTINFO input = new LASTINPUTINFO();
+            input.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+            if (!GetLastInputInfo(ref input)) {
+                status = (uint)Marshal.GetLastWin32Error();
+                return 0;
+            }
+            status = 0;
+            return input.dwTime;
+        }
+
         public static uint GetSystemSleepTimeoutSeconds(out uint status, out bool onAcPower) {
             SYSTEM_POWER_STATUS powerStatus;
             if (!GetSystemPowerStatus(out powerStatus)) {
@@ -252,6 +262,8 @@ function Get-WindowsPowerCountdown {
     $executionState = [TelegramPowerMonitor.NativePower]::GetExecutionState([ref]$executionStatus)
     $idleStatus = [uint32]0
     $idleSeconds = [TelegramPowerMonitor.NativePower]::GetInteractiveSessionIdleSeconds([ref]$idleStatus)
+    $lastInputTickStatus = [uint32]0
+    $lastInputTick = [TelegramPowerMonitor.NativePower]::GetLastInputTick([ref]$lastInputTickStatus)
     $sleepTimeoutStatus = [uint32]0
     $onAcPower = $false
     $sleepTimeoutSeconds = [TelegramPowerMonitor.NativePower]::GetSystemSleepTimeoutSeconds([ref]$sleepTimeoutStatus, [ref]$onAcPower)
@@ -279,6 +291,8 @@ function Get-WindowsPowerCountdown {
         InteractiveSession = $interactiveSession
         IdleSeconds = [uint64]$idleSeconds
         IdleStatus = $idleStatus
+        LastInputTick = [uint32]$lastInputTick
+        LastInputTickStatus = $lastInputTickStatus
         SleepTimeoutSeconds = [uint32]$sleepTimeoutSeconds
         SleepTimeoutStatus = $sleepTimeoutStatus
         OnAcPower = $onAcPower
@@ -295,19 +309,8 @@ function Get-LastSleepCounter {
     return [uint64]$value
 }
 
-function Get-LastSleepTransitionSendTime {
-    if (-not (Test-Path -LiteralPath $StatePath)) { return $null }
-    try {
-        $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ([string]::IsNullOrWhiteSpace([string]$state.lastSleepTransitionNotificationAt)) { return $null }
-        return [datetimeoffset]::Parse([string]$state.lastSleepTransitionNotificationAt)
-    } catch {
-        return $null
-    }
-}
-
 function Invoke-PreSleepNotification {
-    param([int]$SecondsRemaining, [string]$CycleId)
+    param([int]$SecondsRemaining, [string]$CycleId, [uint32]$ExpectedLastInputTick)
 
     $arguments = @(
         "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
@@ -316,6 +319,7 @@ function Invoke-PreSleepNotification {
         "-Reason", "pre-sleep",
         "-RemainingSeconds", "$SecondsRemaining",
         "-CycleId", $CycleId,
+        "-ExpectedLastInputTick", "$ExpectedLastInputTick",
         "-LogRetentionDays", "$LogRetentionDays"
     )
     $process = Start-Process -FilePath $PowerShell -ArgumentList ($arguments -join " ") -WindowStyle Hidden -Wait -PassThru
@@ -360,6 +364,7 @@ try {
     Write-WatcherLog "WATCHER_STARTED PreSleepSeconds=$PreSleepSeconds MaxProbeIntervalSeconds=$MaxProbeIntervalSeconds"
     $armed = $true
     $cooldownUntil = [datetimeoffset]::MinValue
+    $retryCycleDueAt = [datetimeoffset]::MinValue
     $lastTimerSource = $null
     $lastSuspendSequence = [TelegramPowerMonitor.NativePower]::GetSuspendSequence()
     [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
@@ -370,22 +375,8 @@ try {
             $timerSendConfirmed = [TelegramPowerMonitor.NativePower]::GetLastSuspendHadSuccessfulSend()
             $suspendFileTime = [TelegramPowerMonitor.NativePower]::GetLastSuspendUtcFileTime()
             $suspendMoment = if ($suspendFileTime -gt 0) { [datetimeoffset][DateTime]::FromFileTimeUtc($suspendFileTime) } else { $null }
-            $transitionSendConfirmed = $false
-            $transitionSendTime = $null
-            if ($suspendMoment) {
-                # Event 566 normally precedes PBT_APMSUSPEND by about six seconds.
-                # Give its sender a moment to finish before evaluating the receipt.
-                for ($auditAttempt = 0; $auditAttempt -lt 3; $auditAttempt++) {
-                    $transitionSendTime = Get-LastSleepTransitionSendTime
-                    if ($transitionSendTime -and $transitionSendTime -ge $suspendMoment.AddSeconds(-30) -and $transitionSendTime -le $suspendMoment.AddSeconds(3)) {
-                        $transitionSendConfirmed = $true
-                        break
-                    }
-                    if ($auditAttempt -lt 2) { Start-Sleep -Seconds 1 }
-                }
-            }
-            $confirmed = ($timerSendConfirmed -or $transitionSendConfirmed)
-            $confirmationSource = if ($transitionSendConfirmed) { "KernelPower566" } elseif ($timerSendConfirmed) { "NativePowerTimer" } else { "None" }
+            $confirmed = $timerSendConfirmed
+            $confirmationSource = if ($timerSendConfirmed) { "CountdownRecheck" } else { "None" }
             $suspendTimeText = if ($suspendMoment) { $suspendMoment.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz") } else { "Unknown" }
             Write-WatcherLog "SUSPEND_AUDIT Sequence=$suspendSequence PreSleepTelegramConfirmed=$confirmed Source=$confirmationSource SuspendSignalTime=$suspendTimeText"
             [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
@@ -414,47 +405,75 @@ try {
 
         $remaining = [int]$power.TimeRemaining
         if (-not $armed) {
-            if ([datetimeoffset]::Now -ge $cooldownUntil -and $remaining -gt ($PreSleepSeconds + 30)) {
+            $now = [datetimeoffset]::Now
+            $freshWindowsCountdown = ($remaining -gt ($PreSleepSeconds + 30))
+            $internalRetryDue = ($retryCycleDueAt -ne [datetimeoffset]::MinValue -and $now -ge $retryCycleDueAt)
+            if ($now -ge $cooldownUntil -and ($freshWindowsCountdown -or $internalRetryDue)) {
                 $armed = $true
+                $retryCycleDueAt = [datetimeoffset]::MinValue
                 [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
             } else {
-                Start-Sleep -Seconds ([math]::Min(30, [math]::Max(1, $remaining)))
+                $waitForRetry = if ($retryCycleDueAt -ne [datetimeoffset]::MinValue) {
+                    [math]::Max(1, [math]::Ceiling(($retryCycleDueAt - $now).TotalSeconds))
+                } else {
+                    30
+                }
+                Start-Sleep -Seconds ([math]::Min(30, $waitForRetry))
                 continue
             }
         }
 
         if ($remaining -le $PreSleepSeconds) {
+            # GetLastInputInfo is the cycle clock. Re-read it immediately before
+            # sending; any input reset invalidates this cycle.
+            Start-Sleep -Milliseconds 750
+            $recheckedPower = Get-WindowsPowerCountdown
+            $recheckedRemaining = [int]$recheckedPower.TimeRemaining
+            $inputWasReset = ($recheckedPower.IdleSeconds + 1 -lt $power.IdleSeconds)
+            $recheckValid = (
+                $recheckedPower.TimerActive -and
+                -not $recheckedPower.SystemOrDisplayRequired -and
+                $recheckedPower.TimerSource -eq $power.TimerSource -and
+                -not $inputWasReset -and
+                $recheckedRemaining -le $PreSleepSeconds
+            )
+            if (-not $recheckValid) {
+                Write-WatcherLog "PRE_SLEEP_RECHECK_SKIP PreviousSource=$($power.TimerSource) PreviousRemainingSeconds=$remaining PreviousIdleSeconds=$($power.IdleSeconds) NewSource=$($recheckedPower.TimerSource) NewRemainingSeconds=$recheckedRemaining NewIdleSeconds=$($recheckedPower.IdleSeconds) InputWasReset=$inputWasReset TimerActive=$($recheckedPower.TimerActive) SystemOrDisplayRequired=$($recheckedPower.SystemOrDisplayRequired)"
+                $armed = $true
+                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
+                continue
+            }
+
+            $power = $recheckedPower
+            $remaining = $recheckedRemaining
             $cycleId = [guid]::NewGuid().ToString("N")
             $sleepCounterBefore = Get-LastSleepCounter
-            $nativeNotificationAttempted = ($power.TimerSource -eq "SystemPowerInformation")
-            if ($nativeNotificationAttempted) {
-                $exitCode = Invoke-PreSleepNotification -SecondsRemaining $remaining -CycleId $cycleId
-                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($exitCode -eq 0)
-                Write-WatcherLog "PRE_SLEEP_ATTEMPT Cycle=$cycleId Source=NativePowerTimer RemainingSeconds=$remaining SendExitCode=$exitCode"
-            } else {
-                # Interactive idle is only a prediction on Modern Standby. Wait
-                # for Kernel-Power 566 before sending so canceled sleep is silent.
+            $verificationDueAt = [datetimeoffset]::Now.AddSeconds($PreSleepSeconds + 5)
+            $exitCode = Invoke-PreSleepNotification -SecondsRemaining $remaining -CycleId $cycleId -ExpectedLastInputTick $power.LastInputTick
+            if ($exitCode -eq 2) {
                 [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
-                Write-WatcherLog "PRE_SLEEP_PREDICTION Cycle=$cycleId Source=InteractiveSessionIdle RemainingSeconds=$remaining WaitingFor=KernelPower566"
+                Write-WatcherLog "PRE_SLEEP_SEND_CANCELLED Cycle=$cycleId Reason=InputChangedDuringSenderStartup"
+                $armed = $true
+                continue
             }
+            [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($exitCode -eq 0)
+            Write-WatcherLog "PRE_SLEEP_ATTEMPT Cycle=$cycleId Source=$($power.TimerSource) RemainingSeconds=$remaining IdleSeconds=$($power.IdleSeconds) SendExitCode=$exitCode"
             $armed = $false
             $cooldownUntil = [datetimeoffset]::Now.AddSeconds(60)
 
-            # If sleep occurs, this wait is suspended and resumes after wake. Otherwise the cycle is re-evaluated.
-            Start-Sleep -Seconds ($PreSleepSeconds + 20)
+            # Verify about 10-15 seconds after the final idle check. If sleep
+            # occurs, this wait is suspended and resumes after wake.
+            $verificationWait = [math]::Ceiling(($verificationDueAt - [datetimeoffset]::Now).TotalSeconds)
+            if ($verificationWait -gt 0) { Start-Sleep -Seconds $verificationWait }
             $sleepCounterAfter = Get-LastSleepCounter
             if ($sleepCounterBefore -ne $null -and $sleepCounterAfter -ne $null -and $sleepCounterAfter -ne $sleepCounterBefore) {
-                if ($nativeNotificationAttempted) {
-                    Write-WatcherLog "PRE_SLEEP_CONFIRMED Cycle=$cycleId Source=NativePowerTimer"
-                } else {
-                    Write-WatcherLog "SLEEP_PREDICTION_CONFIRMED Cycle=$cycleId Source=KernelPower566"
-                }
+                Write-WatcherLog "PRE_SLEEP_CONFIRMED Cycle=$cycleId Source=$($power.TimerSource)"
             } else {
-                if ($nativeNotificationAttempted) {
-                    Write-WatcherLog "PRE_SLEEP_NOT_CONFIRMED Cycle=$cycleId Source=NativePowerTimer"
-                } else {
-                    Write-WatcherLog "SLEEP_PREDICTION_EXPIRED Cycle=$cycleId TelegramSent=False"
-                }
+                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
+                $refreshedPower = Get-WindowsPowerCountdown
+                $newCycleSeconds = [math]::Max(60, [int]$refreshedPower.SleepTimeoutSeconds - $PreSleepSeconds)
+                $retryCycleDueAt = [datetimeoffset]::Now.AddSeconds($newCycleSeconds)
+                Write-WatcherLog "PRE_SLEEP_NOT_CONFIRMED Cycle=$cycleId Source=$($power.TimerSource) NewSource=$($refreshedPower.TimerSource) NewRemainingSeconds=$($refreshedPower.TimeRemaining) NewCycleSeconds=$newCycleSeconds NewCycleDueAt=$($retryCycleDueAt.ToString('o'))"
             }
             continue
         }

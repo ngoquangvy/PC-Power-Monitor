@@ -1,8 +1,7 @@
 $TelegramLogTaskNames = @(
     "TelegramPowerMonitor-OnStartup",
     "TelegramPowerMonitor-OnResume",
-    "TelegramPowerMonitor-Watcher",
-    "TelegramPowerMonitor-OnSleepTransition"
+    "TelegramPowerMonitor-Watcher"
 )
 
 # Names from older releases are kept here so repair/uninstall also removes them.
@@ -13,7 +12,8 @@ $TelegramLogLegacyTaskNames = @(
     "TelegramBootLog-OnStartup",
     "TelegramBootLog-OnResume",
     "TelegramBootLog-BeforeSleep",
-    "TelegramBootLog-Heartbeat"
+    "TelegramBootLog-Heartbeat",
+    "TelegramPowerMonitor-OnSleepTransition"
 )
 
 $TelegramLogRuntimeDir = Join-Path $env:ProgramData "TelegramPowerMonitor"
