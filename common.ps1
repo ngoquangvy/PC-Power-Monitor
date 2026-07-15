@@ -171,8 +171,13 @@ function Test-TelegramLogTaskExists {
 
     $oldErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & schtasks.exe /Query /TN $TaskName /FO LIST 2>&1 | Out-Null
+    $queryOutput = & schtasks.exe /Query /TN $TaskName /FO LIST 2>&1
     $exists = ($LASTEXITCODE -eq 0)
+    if (-not $exists -and ([string]($queryOutput | Out-String)) -match 'Access is denied|0x80070005') {
+        # SYSTEM tasks may deliberately deny details to a non-elevated user. An
+        # access-denied response for the exact name still proves the task exists.
+        $exists = $true
+    }
     $ErrorActionPreference = $oldErrorActionPreference
     return $exists
 }
@@ -350,6 +355,8 @@ function Show-TelegramLogStatus {
             $result | Select-String -Pattern "TaskName:|Next Run Time:|Status:|Task To Run:" | ForEach-Object {
                 Write-Host "     $($_.Line.Trim())"
             }
+        } elseif (([string]($result | Out-String)) -match 'Access is denied|0x80070005') {
+            Write-Host "[OK] $task (installed; details require Administrator)"
         } else {
             Write-Host "[--] $task not installed"
         }

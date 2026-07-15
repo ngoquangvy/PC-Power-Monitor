@@ -125,11 +125,12 @@ function Register-PowerMonitorTask {
         [string]$Description,
         [string]$ScriptPath,
         [string]$ScriptArguments,
-        [ValidateSet("Boot", "Event", "BootAndEvent")]
+        [ValidateSet("Boot", "Event", "BootAndEvent", "Logon", "LogonAndEvent")]
         [string]$TriggerType,
         [string]$EventSubscription,
         [int]$DelaySeconds = 0,
-        [switch]$LongRunning
+        [switch]$LongRunning,
+        [string]$InteractiveUserSid
     )
 
     $service = New-Object -ComObject "Schedule.Service"
@@ -138,12 +139,12 @@ function Register-PowerMonitorTask {
     $definition = $service.NewTask(0)
 
     $definition.RegistrationInfo.Description = $Description
-    $definition.Principal.UserId = "SYSTEM"
-    $definition.Principal.LogonType = 5 # TASK_LOGON_SERVICE_ACCOUNT
+    $definition.Principal.UserId = if ($InteractiveUserSid) { $InteractiveUserSid } else { "SYSTEM" }
+    $definition.Principal.LogonType = if ($InteractiveUserSid) { 3 } else { 5 } # INTERACTIVE_TOKEN / SERVICE_ACCOUNT
     $definition.Principal.RunLevel = 1  # TASK_RUNLEVEL_HIGHEST
 
     $definition.Settings.Enabled = $true
-    $definition.Settings.Hidden = $false
+    $definition.Settings.Hidden = $true
     $definition.Settings.AllowDemandStart = $true
     $definition.Settings.StartWhenAvailable = $true
     $definition.Settings.DisallowStartIfOnBatteries = $false
@@ -164,13 +165,28 @@ function Register-PowerMonitorTask {
         if ($DelaySeconds -gt 0) { $eventTrigger.Delay = "PT${DelaySeconds}S" }
         $eventTrigger.Enabled = $true
     }
+    if ($TriggerType -in @("Logon", "LogonAndEvent")) {
+        if (-not $InteractiveUserSid) { throw "A user SID is required for a logon-triggered task." }
+        $logonTrigger = $definition.Triggers.Create(9) # TASK_TRIGGER_LOGON
+        $logonTrigger.UserId = $InteractiveUserSid
+        if ($DelaySeconds -gt 0) { $logonTrigger.Delay = "PT${DelaySeconds}S" }
+        $logonTrigger.Enabled = $true
+    }
+    if ($TriggerType -eq "LogonAndEvent") {
+        $eventTrigger = $definition.Triggers.Create(0) # TASK_TRIGGER_EVENT
+        $eventTrigger.Subscription = "<QueryList><Query Id=`"0`" Path=`"System`"><Select Path=`"System`">$EventSubscription</Select></Query></QueryList>"
+        if ($DelaySeconds -gt 0) { $eventTrigger.Delay = "PT${DelaySeconds}S" }
+        $eventTrigger.Enabled = $true
+    }
 
     $action = $definition.Actions.Create(0) # TASK_ACTION_EXEC
     $action.Path = $PowerShell
     $action.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" $ScriptArguments"
     $action.WorkingDirectory = $ScriptDir
 
-    $rootFolder.RegisterTaskDefinition($Name, $definition, 6, "SYSTEM", $null, 5, $null) | Out-Null
+    $registerUser = if ($InteractiveUserSid) { $InteractiveUserSid } else { "SYSTEM" }
+    $registerLogonType = if ($InteractiveUserSid) { 3 } else { 5 }
+    $rootFolder.RegisterTaskDefinition($Name, $definition, 6, $registerUser, $null, $registerLogonType, $null) | Out-Null
 }
 
 function Start-MonitorTask {
@@ -188,6 +204,7 @@ try {
     }
 
     Stop-TelegramLogTray -ScriptDir $ScriptDir
+    Stop-TelegramLogProcesses -ScriptDir $ScriptDir
     Remove-TelegramLogTasks
 
     $resumeEventQuery = "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"
@@ -211,13 +228,14 @@ try {
 
     Register-PowerMonitorTask `
         -Name $TelegramLogTaskNames[2] `
-        -Description "Monitor the Windows system sleep countdown without using keyboard/mouse idle time." `
+        -Description "Monitor the Windows sleep countdown and interactive-session idle fallback." `
         -ScriptPath $WatchScript `
         -ScriptArguments "-PreSleepSeconds $PreSleepSeconds -MaxProbeIntervalSeconds $MaxProbeIntervalSeconds -LogRetentionDays $LogRetentionDays" `
-        -TriggerType BootAndEvent `
+        -TriggerType LogonAndEvent `
         -EventSubscription $resumeEventQuery `
         -DelaySeconds 45 `
-        -LongRunning
+        -LongRunning `
+        -InteractiveUserSid $SettingsUserSid
 
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."
@@ -262,8 +280,8 @@ Write-Host ""
 Write-Host "Installation completed."
 Write-Host "Startup notification: enabled (one per Windows boot)."
 Write-Host "Resume notification: enabled and independent from all pre-sleep notifications."
-Write-Host "Automatic pre-sleep notification: about $PreSleepSeconds seconds before the Windows system sleep countdown expires."
-Write-Host "Keyboard/mouse idle notifications: disabled."
+Write-Host "Automatic pre-sleep notification: about $PreSleepSeconds seconds before the configured Windows sleep timeout expires."
+Write-Host "Generic keyboard/mouse inactivity notifications: disabled; session idle is used only as a Windows sleep-timer fallback."
 Write-Host "Manual shutdown notification: disabled."
 Write-Host "Local log retention: $LogRetentionDays days."
 Show-TelegramLogStatus

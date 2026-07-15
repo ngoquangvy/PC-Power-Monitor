@@ -43,6 +43,22 @@ namespace TelegramPowerMonitor {
             public byte CoolingMode;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LASTINPUTINFO {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SYSTEM_POWER_STATUS {
+            public byte ACLineStatus;
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag;
+            public uint BatteryLifeTime;
+            public uint BatteryFullLifeTime;
+        }
+
         [DllImport("powrprof.dll", EntryPoint="CallNtPowerInformation")]
         private static extern uint CallSystemPowerInformation(
             int informationLevel, IntPtr input, uint inputLength,
@@ -57,6 +73,29 @@ namespace TelegramPowerMonitor {
         private static extern uint CallUInt32PowerInformation(
             int informationLevel, IntPtr input, uint inputLength,
             out uint output, uint outputLength);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool GetLastInputInfo(ref LASTINPUTINFO input);
+
+        [DllImport("kernel32.dll")]
+        private static extern ulong GetTickCount64();
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
+
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerGetActiveScheme(IntPtr rootPowerKey, out IntPtr activePolicyGuid);
+
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerReadACValueIndex(IntPtr rootPowerKey, ref Guid schemeGuid,
+            ref Guid subgroupGuid, ref Guid settingGuid, out uint valueIndex);
+
+        [DllImport("powrprof.dll")]
+        private static extern uint PowerReadDCValueIndex(IntPtr rootPowerKey, ref Guid schemeGuid,
+            ref Guid subgroupGuid, ref Guid settingGuid, out uint valueIndex);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
 
         public static SYSTEM_POWER_INFORMATION GetSystemPowerInformation(out uint status) {
             SYSTEM_POWER_INFORMATION value;
@@ -76,6 +115,44 @@ namespace TelegramPowerMonitor {
             status = CallUInt32PowerInformation(16, IntPtr.Zero, 0, out value, 4);
             return value;
         }
+
+        public static ulong GetInteractiveSessionIdleSeconds(out uint status) {
+            LASTINPUTINFO input = new LASTINPUTINFO();
+            input.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+            if (!GetLastInputInfo(ref input)) {
+                status = (uint)Marshal.GetLastWin32Error();
+                return 0;
+            }
+            status = 0;
+            uint currentTick = unchecked((uint)GetTickCount64());
+            return unchecked(currentTick - input.dwTime) / 1000;
+        }
+
+        public static uint GetSystemSleepTimeoutSeconds(out uint status, out bool onAcPower) {
+            SYSTEM_POWER_STATUS powerStatus;
+            if (!GetSystemPowerStatus(out powerStatus)) {
+                status = (uint)Marshal.GetLastWin32Error();
+                onAcPower = false;
+                return 0;
+            }
+            onAcPower = powerStatus.ACLineStatus == 1;
+
+            IntPtr schemePointer;
+            status = PowerGetActiveScheme(IntPtr.Zero, out schemePointer);
+            if (status != 0) return 0;
+            try {
+                Guid scheme = (Guid)Marshal.PtrToStructure(schemePointer, typeof(Guid));
+                Guid sleepSubgroup = new Guid("238c9fa8-0aad-41ed-83f4-97be242c8f20");
+                Guid sleepAfter = new Guid("29f6c1db-86da-48c5-9fdb-f2b67b1f44da");
+                uint value;
+                status = onAcPower
+                    ? PowerReadACValueIndex(IntPtr.Zero, ref scheme, ref sleepSubgroup, ref sleepAfter, out value)
+                    : PowerReadDCValueIndex(IntPtr.Zero, ref scheme, ref sleepSubgroup, ref sleepAfter, out value);
+                return status == 0 ? value : 0;
+            } finally {
+                LocalFree(schemePointer);
+            }
+        }
     }
 }
 '@
@@ -86,16 +163,41 @@ function Get-WindowsPowerCountdown {
     $info = [TelegramPowerMonitor.NativePower]::GetSystemPowerInformation([ref]$status)
     $executionStatus = [uint32]0
     $executionState = [TelegramPowerMonitor.NativePower]::GetExecutionState([ref]$executionStatus)
+    $idleStatus = [uint32]0
+    $idleSeconds = [TelegramPowerMonitor.NativePower]::GetInteractiveSessionIdleSeconds([ref]$idleStatus)
+    $sleepTimeoutStatus = [uint32]0
+    $onAcPower = $false
+    $sleepTimeoutSeconds = [TelegramPowerMonitor.NativePower]::GetSystemSleepTimeoutSeconds([ref]$sleepTimeoutStatus, [ref]$onAcPower)
+
+    $nativeTimerActive = ($status -eq 0 -and $info.TimeRemaining -ne [uint32]::MaxValue -and $info.TimeRemaining -gt 0)
+    $interactiveSession = ([Diagnostics.Process]::GetCurrentProcess().SessionId -ne 0)
+    $fallbackTimerActive = (-not $nativeTimerActive -and $interactiveSession -and $idleStatus -eq 0 -and $sleepTimeoutStatus -eq 0 -and $sleepTimeoutSeconds -gt 0)
+    $effectiveRemaining = if ($nativeTimerActive) {
+        [uint64]$info.TimeRemaining
+    } elseif ($fallbackTimerActive) {
+        if ($idleSeconds -ge $sleepTimeoutSeconds) { [uint64]0 } else { [uint64]($sleepTimeoutSeconds - $idleSeconds) }
+    } else {
+        [uint64][uint32]::MaxValue
+    }
+    $timerSource = if ($nativeTimerActive) { "SystemPowerInformation" } elseif ($fallbackTimerActive) { "InteractiveSessionIdle" } else { "None" }
 
     return [pscustomobject]@{
         Status = $status
         MaxIdlenessAllowed = [uint32]$info.MaxIdlenessAllowed
         Idleness = [uint32]$info.Idleness
-        TimeRemaining = [uint32]$info.TimeRemaining
-        TimerActive = ($status -eq 0 -and $info.TimeRemaining -ne [uint32]::MaxValue -and $info.TimeRemaining -gt 0)
+        TimeRemaining = $effectiveRemaining
+        TimerActive = ($nativeTimerActive -or $fallbackTimerActive)
+        TimerSource = $timerSource
+        NativeTimeRemaining = [uint32]$info.TimeRemaining
+        InteractiveSession = $interactiveSession
+        IdleSeconds = [uint64]$idleSeconds
+        IdleStatus = $idleStatus
+        SleepTimeoutSeconds = [uint32]$sleepTimeoutSeconds
+        SleepTimeoutStatus = $sleepTimeoutStatus
+        OnAcPower = $onAcPower
         ExecutionState = [uint32]$executionState
         ExecutionStateStatus = $executionStatus
-        SystemOrDisplayRequired = (($executionState -band 0x3) -ne 0)
+        SystemOrDisplayRequired = (($executionState -band 0x43) -ne 0)
     }
 }
 
@@ -138,10 +240,15 @@ try {
     Write-WatcherLog "WATCHER_STARTED PreSleepSeconds=$PreSleepSeconds MaxProbeIntervalSeconds=$MaxProbeIntervalSeconds"
     $armed = $true
     $cooldownUntil = [datetimeoffset]::MinValue
+    $lastTimerSource = $null
 
     while ($true) {
         $power = Get-WindowsPowerCountdown
-        if ($power.Status -ne 0) {
+        if ($power.TimerSource -ne $lastTimerSource) {
+            Write-WatcherLog "POWER_TIMER_SOURCE Source=$($power.TimerSource) SleepTimeoutSeconds=$($power.SleepTimeoutSeconds) InteractiveSession=$($power.InteractiveSession)"
+            $lastTimerSource = $power.TimerSource
+        }
+        if ($power.Status -ne 0 -and $power.TimerSource -ne "InteractiveSessionIdle") {
             Write-WatcherLog "POWER_API_ERROR Status=$($power.Status)"
             Start-Sleep -Seconds 30
             continue
