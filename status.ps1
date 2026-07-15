@@ -28,6 +28,8 @@ if (Test-Path -LiteralPath $StatePath) {
         Write-Host "  Last resume notification: $($state.lastResumeNotificationAt)"
         Write-Host "  Last resume event ID: $($state.lastNotifiedResumeEventId)"
         Write-Host "  Last pre-sleep notification: $($state.lastPreSleepNotificationAt)"
+        Write-Host "  Last confirmed sleep-transition notification: $($state.lastSleepTransitionNotificationAt)"
+        Write-Host "  Last sleep-transition event ID: $($state.lastNotifiedSleepTransitionEventId)"
         Write-Host "  Last successful send: $($state.lastSuccessfulSend)"
         Write-Host "  Last state check: $($state.lastCheckAt)"
     } catch {

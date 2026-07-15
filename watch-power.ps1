@@ -20,6 +20,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
+$StatePath = Join-Path $ScriptDir "state.json"
 $watcherMutex = New-Object System.Threading.Mutex($false, "Local\TelegramPowerMonitorWatcher")
 $hasWatcherLock = $false
 $suspendAuditRegistered = $false
@@ -294,6 +295,17 @@ function Get-LastSleepCounter {
     return [uint64]$value
 }
 
+function Get-LastSleepTransitionSendTime {
+    if (-not (Test-Path -LiteralPath $StatePath)) { return $null }
+    try {
+        $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace([string]$state.lastSleepTransitionNotificationAt)) { return $null }
+        return [datetimeoffset]::Parse([string]$state.lastSleepTransitionNotificationAt)
+    } catch {
+        return $null
+    }
+}
+
 function Invoke-PreSleepNotification {
     param([int]$SecondsRemaining, [string]$CycleId)
 
@@ -355,10 +367,27 @@ try {
     while ($true) {
         $suspendSequence = [TelegramPowerMonitor.NativePower]::GetSuspendSequence()
         if ($suspendSequence -ne $lastSuspendSequence) {
-            $confirmed = [TelegramPowerMonitor.NativePower]::GetLastSuspendHadSuccessfulSend()
+            $timerSendConfirmed = [TelegramPowerMonitor.NativePower]::GetLastSuspendHadSuccessfulSend()
             $suspendFileTime = [TelegramPowerMonitor.NativePower]::GetLastSuspendUtcFileTime()
-            $suspendTime = if ($suspendFileTime -gt 0) { [DateTime]::FromFileTimeUtc($suspendFileTime).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz") } else { "Unknown" }
-            Write-WatcherLog "SUSPEND_AUDIT Sequence=$suspendSequence PreSleepTelegramConfirmed=$confirmed SuspendSignalTime=$suspendTime"
+            $suspendMoment = if ($suspendFileTime -gt 0) { [datetimeoffset][DateTime]::FromFileTimeUtc($suspendFileTime) } else { $null }
+            $transitionSendConfirmed = $false
+            $transitionSendTime = $null
+            if ($suspendMoment) {
+                # Event 566 normally precedes PBT_APMSUSPEND by about six seconds.
+                # Give its sender a moment to finish before evaluating the receipt.
+                for ($auditAttempt = 0; $auditAttempt -lt 3; $auditAttempt++) {
+                    $transitionSendTime = Get-LastSleepTransitionSendTime
+                    if ($transitionSendTime -and $transitionSendTime -ge $suspendMoment.AddSeconds(-30) -and $transitionSendTime -le $suspendMoment.AddSeconds(3)) {
+                        $transitionSendConfirmed = $true
+                        break
+                    }
+                    if ($auditAttempt -lt 2) { Start-Sleep -Seconds 1 }
+                }
+            }
+            $confirmed = ($timerSendConfirmed -or $transitionSendConfirmed)
+            $confirmationSource = if ($transitionSendConfirmed) { "KernelPower566" } elseif ($timerSendConfirmed) { "NativePowerTimer" } else { "None" }
+            $suspendTimeText = if ($suspendMoment) { $suspendMoment.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz") } else { "Unknown" }
+            Write-WatcherLog "SUSPEND_AUDIT Sequence=$suspendSequence PreSleepTelegramConfirmed=$confirmed Source=$confirmationSource SuspendSignalTime=$suspendTimeText"
             [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
             $lastSuspendSequence = $suspendSequence
         }
@@ -397,9 +426,17 @@ try {
         if ($remaining -le $PreSleepSeconds) {
             $cycleId = [guid]::NewGuid().ToString("N")
             $sleepCounterBefore = Get-LastSleepCounter
-            $exitCode = Invoke-PreSleepNotification -SecondsRemaining $remaining -CycleId $cycleId
-            [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($exitCode -eq 0)
-            Write-WatcherLog "PRE_SLEEP_ATTEMPT Cycle=$cycleId RemainingSeconds=$remaining SendExitCode=$exitCode"
+            $nativeNotificationAttempted = ($power.TimerSource -eq "SystemPowerInformation")
+            if ($nativeNotificationAttempted) {
+                $exitCode = Invoke-PreSleepNotification -SecondsRemaining $remaining -CycleId $cycleId
+                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($exitCode -eq 0)
+                Write-WatcherLog "PRE_SLEEP_ATTEMPT Cycle=$cycleId Source=NativePowerTimer RemainingSeconds=$remaining SendExitCode=$exitCode"
+            } else {
+                # Interactive idle is only a prediction on Modern Standby. Wait
+                # for Kernel-Power 566 before sending so canceled sleep is silent.
+                [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
+                Write-WatcherLog "PRE_SLEEP_PREDICTION Cycle=$cycleId Source=InteractiveSessionIdle RemainingSeconds=$remaining WaitingFor=KernelPower566"
+            }
             $armed = $false
             $cooldownUntil = [datetimeoffset]::Now.AddSeconds(60)
 
@@ -407,9 +444,17 @@ try {
             Start-Sleep -Seconds ($PreSleepSeconds + 20)
             $sleepCounterAfter = Get-LastSleepCounter
             if ($sleepCounterBefore -ne $null -and $sleepCounterAfter -ne $null -and $sleepCounterAfter -ne $sleepCounterBefore) {
-                Write-WatcherLog "PRE_SLEEP_CONFIRMED Cycle=$cycleId"
+                if ($nativeNotificationAttempted) {
+                    Write-WatcherLog "PRE_SLEEP_CONFIRMED Cycle=$cycleId Source=NativePowerTimer"
+                } else {
+                    Write-WatcherLog "SLEEP_PREDICTION_CONFIRMED Cycle=$cycleId Source=KernelPower566"
+                }
             } else {
-                Write-WatcherLog "PRE_SLEEP_NOT_CONFIRMED Cycle=$cycleId; waiting for a fresh Windows countdown"
+                if ($nativeNotificationAttempted) {
+                    Write-WatcherLog "PRE_SLEEP_NOT_CONFIRMED Cycle=$cycleId Source=NativePowerTimer"
+                } else {
+                    Write-WatcherLog "SLEEP_PREDICTION_EXPIRED Cycle=$cycleId TelegramSent=False"
+                }
             }
             continue
         }

@@ -1,7 +1,8 @@
 $TelegramLogTaskNames = @(
     "TelegramPowerMonitor-OnStartup",
     "TelegramPowerMonitor-OnResume",
-    "TelegramPowerMonitor-Watcher"
+    "TelegramPowerMonitor-Watcher",
+    "TelegramPowerMonitor-OnSleepTransition"
 )
 
 # Names from older releases are kept here so repair/uninstall also removes them.

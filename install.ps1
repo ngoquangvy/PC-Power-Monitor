@@ -130,6 +130,7 @@ function Register-PowerMonitorTask {
         [string]$EventSubscription,
         [int]$DelaySeconds = 0,
         [switch]$LongRunning,
+        [switch]$NoRestart,
         [string]$InteractiveUserSid
     )
 
@@ -151,8 +152,10 @@ function Register-PowerMonitorTask {
     $definition.Settings.StopIfGoingOnBatteries = $false
     $definition.Settings.ExecutionTimeLimit = if ($LongRunning) { "PT0S" } else { "PT2M" }
     $definition.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
-    $definition.Settings.RestartCount = 10
-    $definition.Settings.RestartInterval = "PT1M"
+    if (-not $NoRestart) {
+        $definition.Settings.RestartCount = 10
+        $definition.Settings.RestartInterval = "PT1M"
+    }
 
     if ($TriggerType -in @("Boot", "BootAndEvent")) {
         $bootTrigger = $definition.Triggers.Create(8) # TASK_TRIGGER_BOOT
@@ -208,6 +211,7 @@ try {
     Remove-TelegramLogTasks
 
     $resumeEventQuery = "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"
+    $sleepTransitionQuery = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=566]] and *[EventData[Data[@Name='Reason']='20' and Data[@Name='PreviousSessionType']='1' and Data[@Name='NextSessionType']='3']]"
 
     Register-PowerMonitorTask `
         -Name $TelegramLogTaskNames[0] `
@@ -236,6 +240,15 @@ try {
         -DelaySeconds 45 `
         -LongRunning `
         -InteractiveUserSid $SettingsUserSid
+
+    Register-PowerMonitorTask `
+        -Name $TelegramLogTaskNames[3] `
+        -Description "Send Telegram only when Windows commits to the active-to-sleep transition." `
+        -ScriptPath $SendScript `
+        -ScriptArguments "-Reason sleep-transition -LogRetentionDays $LogRetentionDays" `
+        -TriggerType Event `
+        -EventSubscription $sleepTransitionQuery `
+        -NoRestart
 
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."
@@ -280,7 +293,7 @@ Write-Host ""
 Write-Host "Installation completed."
 Write-Host "Startup notification: enabled (one per Windows boot)."
 Write-Host "Resume notification: enabled and independent from all pre-sleep notifications."
-Write-Host "Automatic pre-sleep notification: about $PreSleepSeconds seconds before the configured Windows sleep timeout expires."
+Write-Host "Automatic pre-sleep notification: native countdown when available; otherwise only after Windows confirms a sleep transition."
 Write-Host "Generic keyboard/mouse inactivity notifications: disabled; session idle is used only as a Windows sleep-timer fallback."
 Write-Host "Manual shutdown notification: disabled."
 Write-Host "Local log retention: $LogRetentionDays days."
