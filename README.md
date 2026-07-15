@@ -40,7 +40,7 @@ Các mục chính trong menu khay:
 - **Telegram settings...**: sửa token/Chat ID trong form, không hiện console.
 - **Send test message**: gửi một tin thử và báo lại kết quả.
 - **Enable/Disable scheduled tasks**: yêu cầu UAC, bật/tắt toàn bộ task và khởi động/dừng watcher tương ứng. Hai mục này bị vô hiệu hóa nếu task chưa được cài đủ.
-- **Install / repair tasks** và **Uninstall tasks**: mở trình cài/gỡ có cửa sổ để người dùng xem kết quả. Tray được chạy bằng Scheduled Task ẩn theo logon, không kèm cửa sổ terminal và tự khởi động lại nếu lỗi.
+- **Install / repair tasks** và **Uninstall tasks**: mở trình cài/gỡ có cửa sổ để người dùng xem kết quả. Tray được Scheduled Task gọi qua `wscript.exe` ở chế độ cửa sổ ẩn, không kèm terminal PowerShell và tự khởi động lại nếu lỗi.
 - **Open log**, **Open folder** và **Exit tray**: mở log, thư mục app hoặc chỉ thoát biểu tượng khay.
 
 Cài bằng PowerShell:

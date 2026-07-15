@@ -17,4 +17,4 @@ if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
     throw "Telegram Power Monitor tasks are not fully installed. Run INSTALL.cmd first."
 }
 
-Set-TelegramLogTaskState -State $State
+Set-TelegramLogTaskState -State $State -ScriptDir $ScriptDir

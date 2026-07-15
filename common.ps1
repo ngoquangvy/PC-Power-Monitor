@@ -300,7 +300,8 @@ function Stop-TelegramLogTray {
 function Set-TelegramLogTaskState {
     param(
         [ValidateSet("ENABLE", "DISABLE")]
-        [string]$State
+        [string]$State,
+        [string]$ScriptDir
     )
 
     $failedTasks = @()
@@ -320,6 +321,10 @@ function Set-TelegramLogTaskState {
 
     if ($failedTasks.Count -gt 0) {
         throw "Could not change Scheduled Task state: $($failedTasks -join ', ')"
+    }
+
+    if ($State -eq "DISABLE") {
+        Stop-TelegramLogTray -ScriptDir $ScriptDir
     }
 
     if ($State -eq "ENABLE") {

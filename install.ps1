@@ -32,9 +32,10 @@ $ManageTasksScript = Join-Path $ScriptDir "manage-tasks.ps1"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $WatchScript = Join-Path $ScriptDir "watch-power.ps1"
 $TrayScript = Join-Path $ScriptDir "start-tray.ps1"
+$TrayLauncher = Join-Path $ScriptDir "run-tray-hidden.vbs"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $SetupScript, $ManageTasksScript)) {
+foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $TrayLauncher, $SetupScript, $ManageTasksScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Missing required file: $requiredFile"
     }
@@ -132,6 +133,8 @@ function Register-PowerMonitorTask {
         [switch]$LongRunning,
         [switch]$NoRestart,
         [switch]$LeastPrivilege,
+        [string]$ActionPath,
+        [string]$ActionArguments,
         [string]$InteractiveUserSid
     )
 
@@ -184,8 +187,13 @@ function Register-PowerMonitorTask {
     }
 
     $action = $definition.Actions.Create(0) # TASK_ACTION_EXEC
-    $action.Path = $PowerShell
-    $action.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" $ScriptArguments"
+    if ([string]::IsNullOrWhiteSpace($ActionPath)) {
+        $action.Path = $PowerShell
+        $action.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" $ScriptArguments"
+    } else {
+        $action.Path = $ActionPath
+        $action.Arguments = $ActionArguments
+    }
     $action.WorkingDirectory = $ScriptDir
 
     $registerUser = if ($InteractiveUserSid) { $InteractiveUserSid } else { "SYSTEM" }
@@ -245,6 +253,8 @@ try {
         -Description "Run the Telegram Power Monitor tray menu without a visible terminal window." `
         -ScriptPath $TrayScript `
         -ScriptArguments "" `
+        -ActionPath "$env:SystemRoot\System32\wscript.exe" `
+        -ActionArguments "`"$TrayLauncher`"" `
         -TriggerType Logon `
         -DelaySeconds 15 `
         -LongRunning `
