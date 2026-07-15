@@ -1,10 +1,22 @@
 $ErrorActionPreference = "Stop"
 
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir "common.ps1")
+
+trap {
+    try { Write-TelegramLog -ScriptDir $ScriptDir -Message "TRAY_ERROR $($_.Exception.Message)" -RetentionDays 5 } catch {}
+    exit 1
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $ScriptDir "common.ps1")
+$trayMutex = New-Object System.Threading.Mutex($false, "Local\TelegramPowerMonitorTray")
+$hasTrayLock = $trayMutex.WaitOne(0)
+if (-not $hasTrayLock) {
+    $trayMutex.Dispose()
+    exit 0
+}
 
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
@@ -187,4 +199,13 @@ $timer.Add_Tick({ Update-TrayText })
 $timer.Start()
 
 Update-TrayText
-[System.Windows.Forms.Application]::Run()
+try {
+    [System.Windows.Forms.Application]::Run()
+} finally {
+    try { $notifyIcon.Visible = $false } catch {}
+    try { $notifyIcon.Dispose() } catch {}
+    if ($hasTrayLock) {
+        try { $trayMutex.ReleaseMutex() } catch {}
+    }
+    $trayMutex.Dispose()
+}

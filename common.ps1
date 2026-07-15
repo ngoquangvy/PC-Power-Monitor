@@ -1,7 +1,8 @@
 $TelegramLogTaskNames = @(
     "TelegramPowerMonitor-OnStartup",
     "TelegramPowerMonitor-OnResume",
-    "TelegramPowerMonitor-Watcher"
+    "TelegramPowerMonitor-Watcher",
+    "TelegramPowerMonitor-Tray"
 )
 
 # Names from older releases are kept here so repair/uninstall also removes them.
@@ -324,11 +325,14 @@ function Set-TelegramLogTaskState {
     if ($State -eq "ENABLE") {
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        & schtasks.exe /Run /TN $TelegramLogTaskNames[2] 2>&1 | Out-Null
-        $runExitCode = $LASTEXITCODE
+        $failedStarts = @()
+        foreach ($taskIndex in @(2, 3)) {
+            & schtasks.exe /Run /TN $TelegramLogTaskNames[$taskIndex] 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { $failedStarts += $TelegramLogTaskNames[$taskIndex] }
+        }
         $ErrorActionPreference = $oldErrorActionPreference
-        if ($runExitCode -ne 0) {
-            throw "Tasks were enabled, but the power watcher could not be started."
+        if ($failedStarts.Count -gt 0) {
+            throw "Tasks were enabled, but these background components could not be started: $($failedStarts -join ', ')"
         }
     }
 }

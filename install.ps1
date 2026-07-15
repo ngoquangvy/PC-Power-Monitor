@@ -131,6 +131,7 @@ function Register-PowerMonitorTask {
         [int]$DelaySeconds = 0,
         [switch]$LongRunning,
         [switch]$NoRestart,
+        [switch]$LeastPrivilege,
         [string]$InteractiveUserSid
     )
 
@@ -142,7 +143,7 @@ function Register-PowerMonitorTask {
     $definition.RegistrationInfo.Description = $Description
     $definition.Principal.UserId = if ($InteractiveUserSid) { $InteractiveUserSid } else { "SYSTEM" }
     $definition.Principal.LogonType = if ($InteractiveUserSid) { 3 } else { 5 } # INTERACTIVE_TOKEN / SERVICE_ACCOUNT
-    $definition.Principal.RunLevel = 1  # TASK_RUNLEVEL_HIGHEST
+    $definition.Principal.RunLevel = if ($LeastPrivilege) { 0 } else { 1 } # LUA / HIGHEST
 
     $definition.Settings.Enabled = $true
     $definition.Settings.Hidden = $true
@@ -239,30 +240,28 @@ try {
         -LongRunning `
         -InteractiveUserSid $SettingsUserSid
 
+    Register-PowerMonitorTask `
+        -Name $TelegramLogTaskNames[3] `
+        -Description "Run the Telegram Power Monitor tray menu without a visible terminal window." `
+        -ScriptPath $TrayScript `
+        -ScriptArguments "" `
+        -TriggerType Logon `
+        -DelaySeconds 15 `
+        -LongRunning `
+        -LeastPrivilege `
+        -InteractiveUserSid $SettingsUserSid
+
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."
     }
 
     Remove-TelegramLogOldLogs -ScriptDir $ScriptDir -RetentionDays $LogRetentionDays
 
-    if (-not $NoTray) {
-        $startupFolder = [Environment]::GetFolderPath("Startup")
-        if ($startupFolder) {
-            $shortcutPath = Join-Path $startupFolder $TelegramLogStartupShortcutName
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = $PowerShell
-            $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TrayScript`""
-            $shortcut.WorkingDirectory = $ScriptDir
-            $shortcut.IconLocation = "$env:SystemRoot\System32\shell32.dll,277"
-            $shortcut.Save()
-
-            Start-Process -FilePath $PowerShell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TrayScript`"" -WindowStyle Hidden | Out-Null
-        }
-    }
-
     # Start monitoring now and announce that the monitor itself became active.
     Start-MonitorTask -TaskName $TelegramLogTaskNames[2]
+    if (-not $NoTray) {
+        Start-MonitorTask -TaskName $TelegramLogTaskNames[3]
+    }
     & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $SendScript -Reason monitor-start -LogRetentionDays $LogRetentionDays
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Monitor was installed, but the initial online notification could not be sent."
