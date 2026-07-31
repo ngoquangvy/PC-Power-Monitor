@@ -32,10 +32,11 @@ $ManageTasksScript = Join-Path $ScriptDir "manage-tasks.ps1"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $WatchScript = Join-Path $ScriptDir "watch-power.ps1"
 $TrayScript = Join-Path $ScriptDir "start-tray.ps1"
+$CommandListenerScript = Join-Path $ScriptDir "telegram-command-listener.ps1"
 $TrayLauncher = Join-Path $ScriptDir "run-tray-hidden.vbs"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $TrayLauncher, $SetupScript, $ManageTasksScript)) {
+foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $CommandListenerScript, $TrayLauncher, $SetupScript, $ManageTasksScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Missing required file: $requiredFile"
     }
@@ -261,6 +262,16 @@ try {
         -LeastPrivilege `
         -InteractiveUserSid $SettingsUserSid
 
+    Register-PowerMonitorTask `
+        -Name $TelegramLogTaskNames[4] `
+        -Description "Receive the fixed Telegram recovery command and restart only the Tailscale Windows service." `
+        -ScriptPath $CommandListenerScript `
+        -ScriptArguments "-LogRetentionDays $LogRetentionDays" `
+        -TriggerType BootAndEvent `
+        -EventSubscription $resumeEventQuery `
+        -DelaySeconds 45 `
+        -LongRunning
+
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."
     }
@@ -272,6 +283,7 @@ try {
     if (-not $NoTray) {
         Start-MonitorTask -TaskName $TelegramLogTaskNames[3]
     }
+    Start-MonitorTask -TaskName $TelegramLogTaskNames[4]
     & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $SendScript -Reason monitor-start -LogRetentionDays $LogRetentionDays
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Monitor was installed, but the initial online notification could not be sent."

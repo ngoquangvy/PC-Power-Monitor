@@ -105,6 +105,7 @@ function Write-State {
 }
 
 function Get-SystemSnapshot {
+    $moment = [datetimeoffset]::Now
     $lastBoot = $null
     $uptime = "unknown"
     try {
@@ -118,7 +119,8 @@ function Get-SystemSnapshot {
     return [pscustomobject]@{
         Computer = $env:COMPUTERNAME
         User = "$env:USERDOMAIN\$env:USERNAME"
-        Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"
+        Moment = $moment
+        Time = $moment.ToString("yyyy-MM-dd HH:mm:ss zzz")
         LastBoot = $lastBoot
         Uptime = $uptime
     }
@@ -175,13 +177,23 @@ function Get-BootIdentity {
 }
 
 function Send-TelegramNotification {
-    param($State, [string[]]$MessageLines, [string]$EventName)
+    param(
+        $State,
+        [string[]]$MessageLines,
+        [string]$EventName,
+        [int[]]$BoldLineIndexes = @()
+    )
 
     $State.lastInternetCheck = (Get-Date).ToString("o")
     $uri = "https://api.telegram.org/bot$TelegramBotToken/sendMessage"
+    $htmlLines = for ($index = 0; $index -lt $MessageLines.Count; $index++) {
+        $encodedLine = [Net.WebUtility]::HtmlEncode($MessageLines[$index])
+        if ($BoldLineIndexes -contains $index) { "<b>$encodedLine</b>" } else { $encodedLine }
+    }
     $body = @{
         chat_id = $TelegramChatId
-        text = ($MessageLines -join "`n")
+        text = ($htmlLines -join "`n")
+        parse_mode = "HTML"
         disable_web_page_preview = $true
     }
 
@@ -200,6 +212,12 @@ function Send-TelegramNotification {
         Write-LocalLog "SEND_ERROR Event=$EventName Type=$($_.Exception.GetType().Name)"
         throw "Telegram notification could not be sent."
     }
+}
+
+function Get-TelegramRecoveryHintLines {
+    return @(
+        "Remote recovery: send /help"
+    )
 }
 
 try {
@@ -224,8 +242,8 @@ try {
             "Computer: $($snapshot.Computer)",
             "Time: $($snapshot.Time)",
             "Status: startup, resume, and Windows power countdown monitoring are active"
-        )
-        Send-TelegramNotification -State $state -MessageLines $message -EventName "monitor-start"
+        ) + (Get-TelegramRecoveryHintLines)
+        Send-TelegramNotification -State $state -MessageLines $message -EventName "monitor-start" -BoldLineIndexes @(0, 2)
         $state.lastMonitorStartNotificationAt = (Get-Date).ToString("o")
         Write-State $state
         exit 0
@@ -249,8 +267,8 @@ try {
             "Boot event time: $($boot.Time.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz'))",
             "Notification time: $($snapshot.Time)",
             "Status: Windows and Telegram monitor are running"
-        )
-        Send-TelegramNotification -State $state -MessageLines $message -EventName "startup"
+        ) + (Get-TelegramRecoveryHintLines)
+        Send-TelegramNotification -State $state -MessageLines $message -EventName "startup" -BoldLineIndexes @(0, 2)
         $state.lastNotifiedBootId = $boot.Id
         $state.lastStartupNotificationAt = (Get-Date).ToString("o")
         Write-State $state
@@ -280,8 +298,8 @@ try {
             "Wake time: $(if ($resume.WakeTime) { $resume.WakeTime.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz') } else { $snapshot.Time })",
             "Sleep duration: $durationMinutes minutes",
             "Wake source: $($resume.WakeSource)"
-        )
-        Send-TelegramNotification -State $state -MessageLines $message -EventName "resume-$($resume.RecordId)"
+        ) + (Get-TelegramRecoveryHintLines)
+        Send-TelegramNotification -State $state -MessageLines $message -EventName "resume-$($resume.RecordId)" -BoldLineIndexes @(0, 3)
         $state.lastNotifiedResumeEventId = $resume.RecordId
         $state.lastResumeNotificationAt = (Get-Date).ToString("o")
         Write-State $state
@@ -304,14 +322,16 @@ try {
             }
         }
 
+        $expectedSleepTime = $snapshot.Moment.AddSeconds($RemainingSeconds).ToString('yyyy-MM-dd HH:mm:ss zzz')
         $message = @(
             "PC is approaching automatic sleep",
             "Computer: $($snapshot.Computer)",
+            "Expected sleep time: $expectedSleepTime",
             "Windows power timer remaining: about $RemainingSeconds seconds",
-            "Time: $($snapshot.Time)",
+            "Notification time: $($snapshot.Time)",
             "Status: interactive input remained idle during the final countdown recheck"
         )
-        Send-TelegramNotification -State $state -MessageLines $message -EventName "pre-sleep-$CycleId"
+        Send-TelegramNotification -State $state -MessageLines $message -EventName "pre-sleep-$CycleId" -BoldLineIndexes @(0, 2)
         $state.lastPreSleepCycleId = $CycleId
         $state.lastPreSleepNotificationAt = (Get-Date).ToString("o")
         Write-State $state
@@ -325,7 +345,7 @@ try {
         "Time: $($snapshot.Time)",
         "Startup, resume, and Windows power countdown monitoring are enabled"
     )
-    Send-TelegramNotification -State $state -MessageLines $message -EventName $Reason
+    Send-TelegramNotification -State $state -MessageLines $message -EventName $Reason -BoldLineIndexes @(0, 3)
     Write-State $state
     exit 0
 } catch {

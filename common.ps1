@@ -2,7 +2,8 @@ $TelegramLogTaskNames = @(
     "TelegramPowerMonitor-OnStartup",
     "TelegramPowerMonitor-OnResume",
     "TelegramPowerMonitor-Watcher",
-    "TelegramPowerMonitor-Tray"
+    "TelegramPowerMonitor-Tray",
+    "TelegramPowerMonitor-CommandListener"
 )
 
 # Names from older releases are kept here so repair/uninstall also removes them.
@@ -194,7 +195,8 @@ function Get-TelegramLogProcesses {
             $_.CommandLine.IndexOf($ScriptDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             ($_.CommandLine -like "*start-tray.ps1*" -or
              $_.CommandLine -like "*send-telegram-boot-log.ps1*" -or
-             $_.CommandLine -like "*watch-power.ps1*")
+             $_.CommandLine -like "*watch-power.ps1*" -or
+             $_.CommandLine -like "*telegram-command-listener.ps1*")
         }
     return @($processes)
 }
@@ -331,7 +333,7 @@ function Set-TelegramLogTaskState {
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         $failedStarts = @()
-        foreach ($taskIndex in @(2, 3)) {
+        foreach ($taskIndex in @(2, 3, 4)) {
             & schtasks.exe /Run /TN $TelegramLogTaskNames[$taskIndex] 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { $failedStarts += $TelegramLogTaskNames[$taskIndex] }
         }

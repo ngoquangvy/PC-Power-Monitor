@@ -74,8 +74,9 @@ Watcher chạy ẩn trong phiên người dùng tương tác để Windows tính
 - Còn khoảng 10 giây: watcher đợi ngắn và đọc lại `GetLastInputInfo`. Nếu idle giảm, countdown tăng, nguồn timer đổi hoặc xuất hiện yêu cầu giữ System/Display thức thì hủy gửi và cập nhật vòng lặp. Watcher còn truyền `dwTime` sang sender để đối chiếu lần cuối ngay sát lệnh gọi Telegram; input thay đổi trong lúc sender khởi động cũng hủy gửi.
 - Nếu input vẫn không đổi: gửi Telegram một lần, rồi kiểm tra bộ đếm sleep khoảng 10-15 giây sau.
 - Nếu Windows vẫn chưa sleep: chu kỳ vừa gửi bị đánh dấu `PRE_SLEEP_NOT_CONFIRMED`; watcher lấy thời điểm đó làm mốc chu kỳ mới và không gửi lặp ngay.
+- Khi Windows thực sự resume, sự kiện `PBT_APMRESUMEAUTOMATIC` hủy toàn bộ cooldown/retry của lần sleep trước và đặt một chu kỳ mới theo thời điểm thức dậy. Vì vậy countdown đã hết hạn trong lúc sleep/hibernate không thể gây tin pre-sleep ngay sau khi máy mở lại.
 
-Watcher đồng thời đăng ký `PowerRegisterSuspendResumeNotification`. Khi nhận `PBT_APMSUSPEND`, callback không thực hiện mạng. Sau resume, nó kiểm tra chu kỳ Telegram gần nhất rồi hiển thị `PreSleepTelegramConfirmed=True/False` trong log và **Status**.
+Watcher đồng thời đăng ký `PowerRegisterSuspendResumeNotification`. Callback không thực hiện mạng: `PBT_APMSUSPEND` chỉ chụp trạng thái chu kỳ vừa gửi, còn `PBT_APMRESUMEAUTOMATIC` đặt mốc bắt đầu chu kỳ mới. Sau resume, watcher hiển thị `PreSleepTelegramConfirmed=True/False` và `RESUME_CYCLE_RESET` trong log.
 
 ## Kiểm tra
 
@@ -102,6 +103,21 @@ Gửi test thủ công:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\test-send.ps1"
 ```
+
+## Lệnh phục hồi Tailscale qua Telegram
+
+Sau khi chạy **Install / repair tasks**, bot chỉ nhận các lệnh cố định sau từ đúng Chat ID đã cấu hình:
+
+```text
+/help
+/health
+/restart_tailscale
+/restart_pc
+/confirm_restart
+/cancel_restart
+```
+
+`/help` trả về danh sách lệnh. Các tin startup/resume chỉ nhắc `Remote recovery: send /help` để dễ đọc. `/health` trả về uptime, RAM trống, trạng thái Tailscale và các task của app. `/restart_tailscale` chạy ẩn dưới quyền SYSTEM, chỉ restart dịch vụ Windows `Tailscale`, chờ trạng thái kết nối rồi trả kết quả vào chính Telegram. Restart Windows luôn cần hai bước: gửi `/restart_pc`, rồi `/confirm_restart` trong vòng 2 phút; máy restart sau 45 giây và có thể hủy bằng `/cancel_restart`. Bot không nhận lệnh PowerShell tùy ý, không mở port vào Internet và bỏ qua mọi lệnh tồn đọng trước thời điểm listener được cài. Khi máy sleep/hibernate hoặc mất Internet, lệnh này không thể đến máy; nó chỉ là kênh phục hồi khi app vẫn gửi/nhận Telegram nhưng Tailscale bị lỗi.
 
 ## Gỡ cài đặt
 

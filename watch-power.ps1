@@ -121,9 +121,11 @@ namespace TelegramPowerMonitor {
         private static DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS suspendSubscription;
         private static IntPtr suspendRegistration = IntPtr.Zero;
         private static long suspendSequence;
+        private static long resumeSequence;
         private static int currentCycleSendSucceeded;
         private static int lastSuspendHadSuccessfulSend;
         private static long lastSuspendUtcFileTime;
+        private static long lastResumeUtcFileTime;
 
         private static uint OnSuspendResumeNotification(IntPtr context, uint type, IntPtr setting) {
             // PBT_APMSUSPEND. Do no I/O here: Windows gives applications only a
@@ -133,6 +135,12 @@ namespace TelegramPowerMonitor {
                     Volatile.Read(ref currentCycleSendSucceeded));
                 Interlocked.Exchange(ref lastSuspendUtcFileTime, DateTime.UtcNow.ToFileTimeUtc());
                 Interlocked.Increment(ref suspendSequence);
+            } else if (type == 18) {
+                // PBT_APMRESUMEAUTOMATIC is delivered after every real resume,
+                // including an unattended wake. Start a completely new idle
+                // cycle instead of carrying a pre-sleep retry across sleep.
+                Interlocked.Exchange(ref lastResumeUtcFileTime, DateTime.UtcNow.ToFileTimeUtc());
+                Interlocked.Increment(ref resumeSequence);
             }
             return 0;
         }
@@ -242,6 +250,14 @@ namespace TelegramPowerMonitor {
             return Interlocked.Read(ref lastSuspendUtcFileTime);
         }
 
+        public static long GetResumeSequence() {
+            return Interlocked.Read(ref resumeSequence);
+        }
+
+        public static long GetLastResumeUtcFileTime() {
+            return Interlocked.Read(ref lastResumeUtcFileTime);
+        }
+
         public static bool TestSuspendAuditSnapshot() {
             long before = GetSuspendSequence();
             SetCurrentCycleSendSucceeded(true);
@@ -249,6 +265,12 @@ namespace TelegramPowerMonitor {
             bool passed = GetSuspendSequence() == before + 1 && GetLastSuspendHadSuccessfulSend();
             SetCurrentCycleSendSucceeded(false);
             return passed;
+        }
+
+        public static bool TestResumeSnapshot() {
+            long before = GetResumeSequence();
+            OnSuspendResumeNotification(IntPtr.Zero, 18, IntPtr.Zero);
+            return GetResumeSequence() == before + 1 && GetLastResumeUtcFileTime() > 0;
         }
     }
 }
@@ -343,6 +365,7 @@ try {
             Registered = $registered
             Status = $auditStatus
             SnapshotTestPassed = [TelegramPowerMonitor.NativePower]::TestSuspendAuditSnapshot()
+            ResumeSnapshotTestPassed = [TelegramPowerMonitor.NativePower]::TestResumeSnapshot()
         } | Format-List
         if ($registered) { [void][TelegramPowerMonitor.NativePower]::UnregisterSuspendAudit() }
         exit $(if ($registered) { 0 } else { 1 })
@@ -356,7 +379,7 @@ try {
     $auditStatus = [uint32]0
     $suspendAuditRegistered = [TelegramPowerMonitor.NativePower]::RegisterSuspendAudit([ref]$auditStatus)
     if ($suspendAuditRegistered) {
-        Write-WatcherLog "SUSPEND_AUDIT_REGISTERED Provider=PBT_APMSUSPEND"
+        Write-WatcherLog "POWER_NOTIFICATION_REGISTERED Suspend=PBT_APMSUSPEND Resume=PBT_APMRESUMEAUTOMATIC"
     } else {
         Write-WatcherLog "SUSPEND_AUDIT_ERROR Status=$auditStatus"
     }
@@ -367,6 +390,7 @@ try {
     $retryCycleDueAt = [datetimeoffset]::MinValue
     $lastTimerSource = $null
     $lastSuspendSequence = [TelegramPowerMonitor.NativePower]::GetSuspendSequence()
+    $lastResumeSequence = [TelegramPowerMonitor.NativePower]::GetResumeSequence()
     [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
 
     while ($true) {
@@ -383,7 +407,23 @@ try {
             $lastSuspendSequence = $suspendSequence
         }
 
+        $resumeSequence = [TelegramPowerMonitor.NativePower]::GetResumeSequence()
+        $resumeCycleResetPending = ($resumeSequence -ne $lastResumeSequence)
+        if ($resumeCycleResetPending) {
+            $resumeFileTime = [TelegramPowerMonitor.NativePower]::GetLastResumeUtcFileTime()
+            $resumeMoment = if ($resumeFileTime -gt 0) { [datetimeoffset][DateTime]::FromFileTimeUtc($resumeFileTime) } else { [datetimeoffset]::Now }
+            $lastResumeSequence = $resumeSequence
+        }
+
         $power = Get-WindowsPowerCountdown
+        if ($resumeCycleResetPending) {
+            $newCycleSeconds = [math]::Max(60, [int]$power.SleepTimeoutSeconds - $PreSleepSeconds)
+            $armed = $false
+            $cooldownUntil = [datetimeoffset]::MinValue
+            $retryCycleDueAt = [datetimeoffset]::Now.AddSeconds($newCycleSeconds)
+            [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false)
+            Write-WatcherLog "RESUME_CYCLE_RESET Sequence=$resumeSequence ResumeTime=$($resumeMoment.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz')) SleepTimeoutSeconds=$($power.SleepTimeoutSeconds) NewCycleSeconds=$newCycleSeconds NewCycleDueAt=$($retryCycleDueAt.ToString('o'))"
+        }
         if ($power.TimerSource -ne $lastTimerSource) {
             Write-WatcherLog "POWER_TIMER_SOURCE Source=$($power.TimerSource) SleepTimeoutSeconds=$($power.SleepTimeoutSeconds) InteractiveSession=$($power.InteractiveSession)"
             $lastTimerSource = $power.TimerSource
@@ -395,7 +435,10 @@ try {
         }
 
         if (-not $power.TimerActive -or $power.SystemOrDisplayRequired) {
-            if ([datetimeoffset]::Now -ge $cooldownUntil) {
+            # Preserve an explicit new-cycle deadline across resume and across
+            # temporary power requests. Re-arming here would let a stale idle
+            # value send immediately when the request disappears.
+            if ($retryCycleDueAt -eq [datetimeoffset]::MinValue -and [datetimeoffset]::Now -ge $cooldownUntil) {
                 if (-not $armed) { [TelegramPowerMonitor.NativePower]::SetCurrentCycleSendSucceeded($false) }
                 $armed = $true
             }
