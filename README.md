@@ -38,6 +38,7 @@ Các mục chính trong menu khay:
 
 - **Status**: mở trạng thái task và log gần nhất.
 - **Telegram settings...**: sửa token/Chat ID trong form, không hiện console.
+- **Configure AutoLogon...**: nhập password Windows trong terminal UAC khi cần cấu hình hoặc đổi AutoLogon. Mục **Enable/Disable AutoLogon** bên dưới tự hiển thị đúng trạng thái; nếu chưa cấu hình, nó hỏi có mở setup hay không.
 - **Send test message**: gửi một tin thử và báo lại kết quả.
 - **Enable/Disable scheduled tasks**: yêu cầu UAC, bật/tắt toàn bộ task và khởi động/dừng watcher tương ứng. Hai mục này bị vô hiệu hóa nếu task chưa được cài đủ.
 - **Install / repair tasks** và **Uninstall tasks**: mở trình cài/gỡ có cửa sổ để người dùng xem kết quả. Tray được Scheduled Task gọi qua `wscript.exe` ở chế độ cửa sổ ẩn, không kèm terminal PowerShell và tự khởi động lại nếu lỗi.
@@ -115,9 +116,37 @@ Sau khi chạy **Install / repair tasks**, bot chỉ nhận các lệnh cố đ�
 /restart_pc
 /confirm_restart
 /cancel_restart
+/lock_screen
+/wake_display
+/enable_autologon
+/disable_autologon
 ```
 
-`/help` trả về danh sách lệnh. Các tin startup/resume chỉ nhắc `Remote recovery: send /help` để dễ đọc. `/health` trả về uptime, RAM trống, trạng thái Tailscale và các task của app. `/restart_tailscale` chạy ẩn dưới quyền SYSTEM, chỉ restart dịch vụ Windows `Tailscale`, chờ trạng thái kết nối rồi trả kết quả vào chính Telegram. Restart Windows luôn cần hai bước: gửi `/restart_pc`, rồi `/confirm_restart` trong vòng 2 phút; máy restart sau 45 giây và có thể hủy bằng `/cancel_restart`. Bot không nhận lệnh PowerShell tùy ý, không mở port vào Internet và bỏ qua mọi lệnh tồn đọng trước thời điểm listener được cài. Khi máy sleep/hibernate hoặc mất Internet, lệnh này không thể đến máy; nó chỉ là kênh phục hồi khi app vẫn gửi/nhận Telegram nhưng Tailscale bị lỗi.
+`/help` trả về danh sách lệnh. Các tin startup/resume chỉ nhắc `Remote recovery: send /help` để dễ đọc. `/health` trả về uptime, RAM trống, trạng thái Tailscale và các task của app. `/restart_tailscale` chạy ẩn dưới quyền SYSTEM, chỉ restart dịch vụ Windows `Tailscale`, chờ trạng thái kết nối rồi trả kết quả vào chính Telegram. Restart Windows luôn cần hai bước: gửi `/restart_pc`, rồi `/confirm_restart` trong vòng 2 phút; máy restart sau 45 giây và có thể hủy bằng `/cancel_restart`. `/lock_screen` chỉ khóa phiên Windows đã đăng nhập. `/wake_display` chỉ giả lập một chuyển động chuột rất nhỏ để đánh thức màn hình và reset bộ đếm idle; nó không mở khóa hay bypass mật khẩu Windows. Bot trả xác nhận khi task được nhận, còn kết quả thực tế được ghi local log. Bot không nhận lệnh PowerShell tùy ý, không mở port vào Internet và bỏ qua mọi lệnh tồn đọng trước thời điểm listener được cài. Khi máy sleep/hibernate hoặc mất Internet, lệnh này không thể đến máy; nó chỉ là kênh phục hồi khi app vẫn gửi/nhận Telegram nhưng Tailscale bị lỗi.
+
+## Windows AutoLogon (Tùy chọn)
+
+Nếu bạn muốn máy tự động đăng nhập khi khởi động để các ứng dụng tự nạp state:
+- Script `setup-autologon.ps1` sẽ tự động tải `Autologon.exe` từ Sysinternals (kiểm tra chữ ký số Microsoft) và lưu ngay tại thư mục dự án.
+- Mật khẩu được mã hóa an toàn trong **Windows LSA Secrets** (không lưu dạng plaintext).
+- Cấu hình này là tùy chọn, không tự hỏi lại khi chạy `INSTALL.cmd` hoặc repair task. Chủ động chạy thủ công:
+
+```powershell
+# Cấu hình lưu credentials ban đầu (hoặc đổi password)
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\setup-autologon.ps1"
+
+# Bật/Tắt cờ AutoLogon nhanh
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\setup-autologon.ps1" -SetFlagOnly -Enable
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\setup-autologon.ps1" -SetFlagOnly -Disable
+```
+
+Ngoài ra, bạn có thể điều khiển trực tiếp qua Telegram:
+- `/enable_autologon`: Bật cờ AutoLogon từ xa để lần khởi động lại tới máy sẽ tự động đăng nhập nạp state.
+- `/disable_autologon`: Tắt cờ AutoLogon từ xa.
+
+Hai lệnh Telegram chỉ hoạt động sau khi bạn đã chạy cấu hình AutoLogon thành công bằng script này; bot xác nhận lại trạng thái registry trước khi báo thành công.
+
+Gỡ cài đặt bằng `UNINSTALL.cmd` cũng sẽ tự động tắt AutoLogon và dọn dẹp file `Autologon.exe`.
 
 ## Gỡ cài đặt
 

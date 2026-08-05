@@ -3,7 +3,9 @@ $TelegramLogTaskNames = @(
     "TelegramPowerMonitor-OnResume",
     "TelegramPowerMonitor-Watcher",
     "TelegramPowerMonitor-Tray",
-    "TelegramPowerMonitor-CommandListener"
+    "TelegramPowerMonitor-CommandListener",
+    "TelegramPowerMonitor-LockScreen",
+    "TelegramPowerMonitor-WakeDisplay"
 )
 
 # Names from older releases are kept here so repair/uninstall also removes them.
@@ -15,11 +17,13 @@ $TelegramLogLegacyTaskNames = @(
     "TelegramBootLog-OnResume",
     "TelegramBootLog-BeforeSleep",
     "TelegramBootLog-Heartbeat",
-    "TelegramPowerMonitor-OnSleepTransition"
+    "TelegramPowerMonitor-OnSleepTransition",
+    "TelegramPowerMonitor-UnlockScreen"
 )
 
 $TelegramLogRuntimeDir = Join-Path $env:ProgramData "TelegramPowerMonitor"
 $TelegramLogConfigPath = Join-Path $TelegramLogRuntimeDir "config.json"
+$TelegramLogTaskStatePath = Join-Path $TelegramLogRuntimeDir "scheduled-task-state.json"
 $TelegramLogLegacyRuntimeDirs = @(
     (Join-Path $env:ProgramData "TelegramIdleMonitor")
 )
@@ -196,7 +200,11 @@ function Get-TelegramLogProcesses {
             ($_.CommandLine -like "*start-tray.ps1*" -or
              $_.CommandLine -like "*send-telegram-boot-log.ps1*" -or
              $_.CommandLine -like "*watch-power.ps1*" -or
-             $_.CommandLine -like "*telegram-command-listener.ps1*")
+             $_.CommandLine -like "*telegram-command-listener.ps1*" -or
+             $_.CommandLine -like "*lock-screen.ps1*" -or
+             $_.CommandLine -like "*wake-display.ps1*" -or
+             $_.CommandLine -like "*unlock-screen.ps1*" -or
+             $_.CommandLine -like "*setup-autologon.ps1*")
         }
     return @($processes)
 }
@@ -342,6 +350,31 @@ function Set-TelegramLogTaskState {
             throw "Tasks were enabled, but these background components could not be started: $($failedStarts -join ', ')"
         }
     }
+
+    Set-TelegramLogScheduledTaskEnabledState -Enabled ($State -eq "ENABLE")
+}
+
+function Get-TelegramLogScheduledTaskEnabledState {
+    if (-not (Test-Path -LiteralPath $TelegramLogTaskStatePath)) { return $null }
+    try {
+        $state = Get-Content -LiteralPath $TelegramLogTaskStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $state -and $state.PSObject.Properties.Name -contains "Enabled") {
+            return [bool]$state.Enabled
+        }
+    } catch {}
+    return $null
+}
+
+function Set-TelegramLogScheduledTaskEnabledState {
+    param([bool]$Enabled)
+
+    if (-not (Test-Path -LiteralPath $TelegramLogRuntimeDir)) {
+        New-Item -ItemType Directory -Path $TelegramLogRuntimeDir -Force | Out-Null
+    }
+    [ordered]@{
+        Enabled = $Enabled
+        ChangedAt = [datetimeoffset]::Now.ToString("o")
+    } | ConvertTo-Json | Set-Content -LiteralPath $TelegramLogTaskStatePath -Encoding UTF8 -Force
 }
 
 function Get-TelegramLogInstalledTaskCount {

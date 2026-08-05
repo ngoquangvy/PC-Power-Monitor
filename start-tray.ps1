@@ -22,11 +22,13 @@ $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $StatusScript = Join-Path $ScriptDir "status.ps1"
 $SettingsScript = Join-Path $ScriptDir "setup-config.ps1"
+$AutoLogonScript = Join-Path $ScriptDir "setup-autologon.ps1"
 $ManageTasksScript = Join-Path $ScriptDir "manage-tasks.ps1"
 $InstallCmd = Join-Path $ScriptDir "INSTALL.cmd"
 $UninstallCmd = Join-Path $ScriptDir "UNINSTALL.cmd"
 $LogDirectory = Get-TelegramLogDirectory -ScriptDir $ScriptDir
 $StatePath = Join-Path $ScriptDir "state.json"
+$AutoLogonMarkerPath = Join-Path $TelegramLogRuntimeDir "autologon-managed.json"
 
 function Start-HiddenPowerShell {
     param([string]$ArgumentLine)
@@ -74,6 +76,87 @@ function Invoke-ElevatedTaskState {
     Show-TrayBalloon -Text $resultText
 }
 
+function Invoke-ScheduledTaskToggle {
+    if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
+        Show-TrayMessage -Text "Scheduled Tasks are not fully installed. Run Install / repair tasks first." -ErrorMessage
+        return
+    }
+
+    $enabled = Get-TelegramLogScheduledTaskEnabledState
+    if ($null -eq $enabled) {
+        throw "Scheduled Task state is unknown. Run Install / repair tasks once to synchronize it."
+    }
+    Invoke-ElevatedTaskState -State $(if ($enabled) { "DISABLE" } else { "ENABLE" })
+}
+
+function Get-AutoLogonTrayState {
+    if (-not (Test-Path -LiteralPath $AutoLogonScript)) {
+        return [pscustomobject]@{ Managed = $false; Enabled = $false; Text = "AutoLogon support unavailable" }
+    }
+    if (-not (Test-Path -LiteralPath $AutoLogonMarkerPath)) {
+        return [pscustomobject]@{ Managed = $false; Enabled = $false; Text = "AutoLogon not configured" }
+    }
+
+    try {
+        $property = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -ErrorAction Stop
+        $value = [string]$property.AutoAdminLogon
+        $enabled = ($value -eq "1")
+        return [pscustomobject]@{
+            Managed = $true
+            Enabled = $enabled
+            Text = if ($enabled) { "AutoLogon enabled for next boot" } else { "AutoLogon disabled" }
+        }
+    } catch {
+        return [pscustomobject]@{ Managed = $true; Enabled = $false; Text = "AutoLogon status unavailable" }
+    }
+}
+
+function Invoke-AutoLogonSetup {
+    if (-not (Test-Path -LiteralPath $AutoLogonScript)) {
+        throw "AutoLogon setup script is missing. Run Install / repair tasks again."
+    }
+
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$AutoLogonScript`""
+    $process = Start-Process -FilePath $PowerShell -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "AutoLogon setup did not complete."
+    }
+    $state = Get-AutoLogonTrayState
+    if (-not $state.Managed) {
+        throw "AutoLogon setup finished without a managed configuration."
+    }
+    Show-TrayBalloon -Text $state.Text
+}
+
+function Invoke-AutoLogonToggle {
+    $state = Get-AutoLogonTrayState
+    if (-not $state.Managed) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "AutoLogon has not been configured by Telegram Power Monitor. Configure it now?",
+            "Telegram Power Monitor",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Invoke-AutoLogonSetup
+        }
+        return
+    }
+
+    $operation = if ($state.Enabled) { "Disable" } else { "Enable" }
+    $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$AutoLogonScript`" -SetFlagOnly -$operation"
+    $process = Start-Process -FilePath $PowerShell -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Windows could not $($operation.ToLowerInvariant()) AutoLogon."
+    }
+
+    $updated = Get-AutoLogonTrayState
+    if ($updated.Enabled -eq $state.Enabled) {
+        throw "Windows did not report the requested AutoLogon state."
+    }
+    Show-TrayBalloon -Text $updated.Text
+}
+
 function Get-InternetStatusText {
     if (Test-Path -LiteralPath $StatePath) {
         try {
@@ -107,9 +190,10 @@ $notifyIcon.Visible = $true
 
 $statusItem = $menu.Items.Add("Status")
 $settingsItem = $menu.Items.Add("Telegram settings...")
+$autoLogonSetupItem = $menu.Items.Add("Configure AutoLogon...")
+$autoLogonToggleItem = $menu.Items.Add("AutoLogon")
 $testItem = $menu.Items.Add("Send test message")
-$enableItem = $menu.Items.Add("Enable scheduled tasks")
-$disableItem = $menu.Items.Add("Disable scheduled tasks")
+$scheduledTaskToggleItem = $menu.Items.Add("Scheduled tasks")
 $installItem = $menu.Items.Add("Install / repair tasks")
 $uninstallItem = $menu.Items.Add("Uninstall tasks")
 $menu.Items.Add("-") | Out-Null
@@ -128,6 +212,16 @@ $settingsItem.Add_Click({
     catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
+$autoLogonSetupItem.Add_Click({
+    try { Invoke-AutoLogonSetup }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
+})
+
+$autoLogonToggleItem.Add_Click({
+    try { Invoke-AutoLogonToggle }
+    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
+})
+
 $testItem.Add_Click({
     try {
         $process = Start-Process -FilePath $PowerShell -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$SendScript`" -Reason tray-test" -WindowStyle Hidden -Wait -PassThru
@@ -137,13 +231,8 @@ $testItem.Add_Click({
     } catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
-$enableItem.Add_Click({
-    try { Invoke-ElevatedTaskState -State ENABLE }
-    catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
-})
-
-$disableItem.Add_Click({
-    try { Invoke-ElevatedTaskState -State DISABLE }
+$scheduledTaskToggleItem.Add_Click({
+    try { Invoke-ScheduledTaskToggle }
     catch { Show-TrayMessage -Text $_.Exception.Message -ErrorMessage }
 })
 
@@ -184,10 +273,24 @@ $exitItem.Add_Click({
 $notifyIcon.ContextMenuStrip = $menu
 $menu.Add_Opening({
     $tasksReady = ((Get-TelegramLogInstalledTaskCount) -eq $TelegramLogTaskNames.Count)
-    $enableItem.Enabled = $tasksReady
-    $disableItem.Enabled = $tasksReady
-    $enableItem.Text = if ($tasksReady) { "Enable scheduled tasks" } else { "Enable scheduled tasks (install first)" }
-    $disableItem.Text = if ($tasksReady) { "Disable scheduled tasks" } else { "Disable scheduled tasks (install first)" }
+    $scheduledTaskToggleItem.Enabled = $tasksReady
+    $scheduledEnabled = Get-TelegramLogScheduledTaskEnabledState
+    $scheduledTaskToggleItem.Text = if (-not $tasksReady) {
+        "Scheduled tasks (install first)"
+    } elseif ($null -eq $scheduledEnabled) {
+        "Scheduled tasks (state unknown; repair first)"
+    } elseif ($scheduledEnabled) {
+        "Disable scheduled tasks"
+    } else {
+        "Enable scheduled tasks"
+    }
+    $autoLogon = Get-AutoLogonTrayState
+    $autoLogonSetupItem.Text = if ($autoLogon.Managed) { "Reconfigure AutoLogon..." } else { "Configure AutoLogon..." }
+    $autoLogonToggleItem.Text = if ($autoLogon.Managed) {
+        if ($autoLogon.Enabled) { "Disable AutoLogon" } else { "Enable AutoLogon" }
+    } else {
+        "Enable AutoLogon (configure first)"
+    }
 })
 $notifyIcon.Add_DoubleClick({
     Start-VisiblePowerShell "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$StatusScript`""

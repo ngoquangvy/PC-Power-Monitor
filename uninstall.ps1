@@ -41,6 +41,18 @@ if (-not (Test-TelegramLogAdmin)) {
     exit $process.ExitCode
 }
 
+$setupAutologonScript = Join-Path $ScriptDir "setup-autologon.ps1"
+if (Test-Path -LiteralPath $setupAutologonScript) {
+    try {
+        & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $setupAutologonScript -Disable
+        if ($LASTEXITCODE -ne 0) {
+            throw "setup-autologon.ps1 exited with code $LASTEXITCODE."
+        }
+    } catch {
+        throw "Uninstall stopped because AutoLogon could not be disabled: $($_.Exception.Message)"
+    }
+}
+
 Stop-TelegramLogTray -ScriptDir $ScriptDir
 Remove-TelegramLogTasks
 Stop-TelegramLogProcesses -ScriptDir $ScriptDir
@@ -64,6 +76,8 @@ if ($RemoveRuntimeData) {
         Remove-Item -Force -ErrorAction SilentlyContinue
     Get-ChildItem -LiteralPath $ScriptDir -File -Filter "telegram-send-*.py" -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $ScriptDir "Autologon.exe") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $ScriptDir "Autologon.exe.tmp") -Force -ErrorAction SilentlyContinue
 
     if (Test-Path -LiteralPath $TelegramLogRuntimeDir) {
         $expectedRuntime = [IO.Path]::GetFullPath((Join-Path $env:ProgramData "TelegramPowerMonitor"))

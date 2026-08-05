@@ -14,6 +14,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $CommandStatePath = Join-Path $TelegramLogRuntimeDir "command-state.json"
 $TailscaleCli = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+$PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$LockScreenTaskName = "TelegramPowerMonitor-LockScreen"
+$WakeDisplayTaskName = "TelegramPowerMonitor-WakeDisplay"
 $listenerMutex = New-Object System.Threading.Mutex($false, "Local\TelegramPowerMonitorCommandListener")
 $hasListenerLock = $false
 
@@ -174,7 +177,11 @@ function Get-CommandHelpReply {
         "/restart_tailscale - restart only Tailscale",
         "/restart_pc - request a Windows restart",
         "/confirm_restart - confirm within 2 minutes",
-        "/cancel_restart - cancel a pending restart"
+        "/cancel_restart - cancel a pending restart",
+        "/lock_screen - lock the current Windows session",
+        "/wake_display - wake display and reset idle timer",
+        "/enable_autologon - enable AutoLogon flag for next boot",
+        "/disable_autologon - disable AutoLogon flag"
     ) -join "`n"
 }
 
@@ -231,7 +238,7 @@ try {
         $backlog = Get-TelegramUpdates -Token $token -Offset 0 -TimeoutSeconds 0
         foreach ($update in $backlog) { Advance-UpdateOffset -State $state -Update $update }
     }
-    Write-CommandLog "COMMAND_LISTENER_STARTED Commands=/help,/health,/restart_tailscale,/restart_pc,/confirm_restart,/cancel_restart"
+    Write-CommandLog "COMMAND_LISTENER_STARTED Commands=/help,/health,/restart_tailscale,/restart_pc,/confirm_restart,/cancel_restart,/lock_screen,/wake_display,/enable_autologon,/disable_autologon"
 
     $lastPollErrorAt = [datetimeoffset]::MinValue
     while ($true) {
@@ -254,6 +261,38 @@ try {
                     } elseif ($text -match '(?i)^/health(?:@[A-Za-z0-9_]+)?\s*$') {
                         Send-CommandReply -Token $token -ChatId $allowedChatId -Text (Get-MachineHealthReply)
                         Write-CommandLog "COMMAND_HEALTH UpdateId=$($update.update_id)"
+                    } elseif ($text -match '(?i)^/lock_screen(?:@[A-Za-z0-9_]+)?\s*$') {
+                        & schtasks.exe /Run /TN $LockScreenTaskName 2>&1 | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "Windows could not start the lock-screen task." }
+                        Send-CommandReply -Token $token -ChatId $allowedChatId -Text "Windows lock-screen request accepted."
+                        Write-CommandLog "COMMAND_LOCK_SCREEN UpdateId=$($update.update_id)"
+                    } elseif ($text -match '(?i)^/wake_display(?:@[A-Za-z0-9_]+)?\s*$') {
+                        & schtasks.exe /Run /TN $WakeDisplayTaskName 2>&1 | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "Windows could not start the wake-display task." }
+                        Send-CommandReply -Token $token -ChatId $allowedChatId -Text "Wake-display request accepted. The local log records the final result."
+                        Write-CommandLog "COMMAND_WAKE_DISPLAY UpdateId=$($update.update_id)"
+                    } elseif ($text -match '(?i)^/enable_autologon(?:@[A-Za-z0-9_]+)?\s*$') {
+                        try {
+                            $setupScript = Join-Path $ScriptDir "setup-autologon.ps1"
+                            $out = & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $setupScript -SetFlagOnly -Enable 2>&1 | Out-String
+                            if ($LASTEXITCODE -ne 0) { throw $out.Trim() }
+                            Send-CommandReply -Token $token -ChatId $allowedChatId -Text "AutoLogon enabled for next boot.`n$($out.Trim())"
+                            Write-CommandLog "COMMAND_ENABLE_AUTOLOGON UpdateId=$($update.update_id)"
+                        } catch {
+                            Send-CommandReply -Token $token -ChatId $allowedChatId -Text "Failed to enable AutoLogon: $($_.Exception.Message)"
+                            Write-CommandLog "COMMAND_ENABLE_AUTOLOGON_ERROR UpdateId=$($update.update_id) Error=$($_.Exception.Message)"
+                        }
+                    } elseif ($text -match '(?i)^/disable_autologon(?:@[A-Za-z0-9_]+)?\s*$') {
+                        try {
+                            $setupScript = Join-Path $ScriptDir "setup-autologon.ps1"
+                            $out = & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $setupScript -SetFlagOnly -Disable 2>&1 | Out-String
+                            if ($LASTEXITCODE -ne 0) { throw $out.Trim() }
+                            Send-CommandReply -Token $token -ChatId $allowedChatId -Text "AutoLogon disabled.`n$($out.Trim())"
+                            Write-CommandLog "COMMAND_DISABLE_AUTOLOGON UpdateId=$($update.update_id)"
+                        } catch {
+                            Send-CommandReply -Token $token -ChatId $allowedChatId -Text "Failed to disable AutoLogon: $($_.Exception.Message)"
+                            Write-CommandLog "COMMAND_DISABLE_AUTOLOGON_ERROR UpdateId=$($update.update_id) Error=$($_.Exception.Message)"
+                        }
                     } elseif ($text -match '(?i)^/restart_tailscale(?:@[A-Za-z0-9_]+)?\s*$') {
                         try {
                             $result = Restart-TailscaleService

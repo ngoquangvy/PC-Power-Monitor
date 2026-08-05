@@ -12,6 +12,7 @@ param(
     [switch]$SkipTest,
     [switch]$NoTray,
     [switch]$NoElevation,
+    [switch]$SetupAutologon,
     [string]$SettingsUserSid,
 
     # Accepted for compatibility with test commands from the input-idle version; no longer used.
@@ -33,10 +34,13 @@ $SendScript = Join-Path $ScriptDir "send-telegram-boot-log.ps1"
 $WatchScript = Join-Path $ScriptDir "watch-power.ps1"
 $TrayScript = Join-Path $ScriptDir "start-tray.ps1"
 $CommandListenerScript = Join-Path $ScriptDir "telegram-command-listener.ps1"
+$LockScreenScript = Join-Path $ScriptDir "lock-screen.ps1"
+$WakeDisplayScript = Join-Path $ScriptDir "wake-display.ps1"
+$AutoLogonScript = Join-Path $ScriptDir "setup-autologon.ps1"
 $TrayLauncher = Join-Path $ScriptDir "run-tray-hidden.vbs"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $CommandListenerScript, $TrayLauncher, $SetupScript, $ManageTasksScript)) {
+foreach ($requiredFile in @($SendScript, $WatchScript, $TrayScript, $CommandListenerScript, $LockScreenScript, $WakeDisplayScript, $AutoLogonScript, $TrayLauncher, $SetupScript, $ManageTasksScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Missing required file: $requiredFile"
     }
@@ -77,6 +81,7 @@ if (-not (Test-TelegramLogAdmin)) {
     )
     if ($SendTest) { $arguments += "-SendTest" }
     if ($NoTray) { $arguments += "-NoTray" }
+    if ($SetupAutologon) { $arguments += "-SetupAutologon" }
 
     Write-Host "Requesting administrator permission..."
     $process = Start-Process -FilePath $PowerShell -ArgumentList ($arguments -join " ") -Verb RunAs -Wait -PassThru
@@ -127,7 +132,7 @@ function Register-PowerMonitorTask {
         [string]$Description,
         [string]$ScriptPath,
         [string]$ScriptArguments,
-        [ValidateSet("Boot", "Event", "BootAndEvent", "Logon", "LogonAndEvent")]
+        [ValidateSet("None", "Boot", "Event", "BootAndEvent", "Logon", "LogonAndEvent")]
         [string]$TriggerType,
         [string]$EventSubscription,
         [int]$DelaySeconds = 0,
@@ -272,9 +277,26 @@ try {
         -DelaySeconds 45 `
         -LongRunning
 
+    Register-PowerMonitorTask `
+        -Name $TelegramLogTaskNames[5] `
+        -Description "Lock the configured interactive Windows session only when requested by the Telegram command listener." `
+        -ScriptPath $LockScreenScript `
+        -ScriptArguments "-LogRetentionDays $LogRetentionDays" `
+        -TriggerType None `
+        -InteractiveUserSid $SettingsUserSid
+
+    Register-PowerMonitorTask `
+        -Name $TelegramLogTaskNames[6] `
+        -Description "Wake the display and reset the idle timer for the configured interactive Windows session only when requested by the Telegram command listener." `
+        -ScriptPath $WakeDisplayScript `
+        -ScriptArguments "-LogRetentionDays $LogRetentionDays" `
+        -TriggerType None `
+        -InteractiveUserSid $SettingsUserSid
+
     if ((Get-TelegramLogInstalledTaskCount) -ne $TelegramLogTaskNames.Count) {
         throw "Scheduled Task verification failed."
     }
+    Set-TelegramLogScheduledTaskEnabledState -Enabled $true
 
     Remove-TelegramLogOldLogs -ScriptDir $ScriptDir -RetentionDays $LogRetentionDays
 
@@ -306,5 +328,11 @@ Write-Host "Resume notification: enabled and independent from all pre-sleep noti
 Write-Host "Automatic pre-sleep notification: native countdown when available; otherwise only after Windows confirms a sleep transition."
 Write-Host "Generic keyboard/mouse inactivity notifications: disabled; session idle is used only as a Windows sleep-timer fallback."
 Write-Host "Manual shutdown notification: disabled."
-Write-Host "Local log retention: $LogRetentionDays days."
-Show-TelegramLogStatus
+    if ($SetupAutologon) {
+        Write-Host ""
+        & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $AutoLogonScript
+        if ($LASTEXITCODE -ne 0) { throw "AutoLogon configuration failed with exit code $LASTEXITCODE." }
+    }
+
+    Write-Host "Local log retention: $LogRetentionDays days."
+    Show-TelegramLogStatus
