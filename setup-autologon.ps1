@@ -31,7 +31,7 @@ function Get-AutologonExe {
         return $AutologonExePath
     }
 
-    Write-Host "Autologon.exe not found — downloading from Sysinternals..."
+    Write-Host "Autologon.exe not found - downloading from Sysinternals..."
     $downloadUrl = "https://live.sysinternals.com/Autologon.exe"
     $tempPath = "$AutologonExePath.tmp"
     try {
@@ -41,7 +41,7 @@ function Get-AutologonExe {
         throw "Could not download Autologon.exe: $($_.Exception.Message)"
     }
 
-    # Verify Authenticode signature — the file is signed by Microsoft.
+    # Verify Authenticode signature - the file is signed by Microsoft.
     $sig = Get-AuthenticodeSignature -FilePath $tempPath
     if ($sig.Status -ne "Valid") {
         Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
@@ -64,6 +64,58 @@ function Get-WinlogonProperty {
     } catch {
         return $null
     }
+}
+
+function Test-AutoLogonCredentials {
+    param(
+        [string]$UserName,
+        [string]$Domain,
+        [string]$Password
+    )
+
+    if (-not ("TelegramPowerMonitor.CredentialValidation" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace TelegramPowerMonitor {
+    public static class CredentialValidation {
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool LogonUserW(
+            string userName,
+            string domain,
+            string password,
+            int logonType,
+            int logonProvider,
+            out IntPtr token);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        // LOGON32_LOGON_INTERACTIVE = 2 and LOGON32_PROVIDER_DEFAULT = 0.
+        // The token is immediately closed; this only validates the password.
+        public static uint Validate(string userName, string domain, string password) {
+            IntPtr token;
+            if (!LogonUserW(userName, domain, password, 2, 0, out token)) {
+                return (uint)Marshal.GetLastWin32Error();
+            }
+            CloseHandle(token);
+            return 0;
+        }
+    }
+}
+'@
+    }
+
+    $errorCode = [TelegramPowerMonitor.CredentialValidation]::Validate($UserName, $Domain, $Password)
+    if ($errorCode -eq 0) { return }
+    if ($errorCode -eq 1326) {
+        throw "Windows could not verify the username or password. AutoLogon was not changed."
+    }
+    if ($errorCode -eq 1385) {
+        throw "This account is not allowed to sign in interactively. AutoLogon was not changed."
+    }
+    throw "Windows could not verify the account credentials (Win32 error $errorCode). AutoLogon was not changed."
 }
 
 function Test-AppManagedAutoLogon {
@@ -146,7 +198,7 @@ namespace TelegramPowerMonitor {
     }
 }
 
-# ── TOGGLE FLAG ONLY ──────────────────────────────────────────────────────────
+# --- TOGGLE FLAG ONLY -----------------------------------------------------------
 if ($SetFlagOnly) {
     if ($Enable -and $Disable) {
         throw "Cannot specify both -Enable and -Disable."
@@ -173,7 +225,7 @@ if ($SetFlagOnly) {
     exit 0
 }
 
-# ── DISABLE ────────────────────────────────────────────────────────────────────
+# --- DISABLE --------------------------------------------------------------------
 if ($Disable) {
     if (Test-AppManagedAutoLogon) {
         $username = [string](Get-WinlogonProperty -Name "DefaultUserName")
@@ -195,12 +247,10 @@ if ($Disable) {
     exit 0
 }
 
-# ── ENABLE ─────────────────────────────────────────────────────────────────────
+# --- ENABLE ---------------------------------------------------------------------
 if (-not (Test-TelegramLogAdmin)) {
     throw "Administrator rights are required to configure Windows AutoLogon."
 }
-
-$autologonExe = Get-AutologonExe
 
 $currentValue  = Get-WinlogonProperty "AutoAdminLogon"
 $configuredUser = [string](Get-WinlogonProperty "DefaultUserName")
@@ -236,6 +286,8 @@ try {
 }
 
 try {
+    Test-AutoLogonCredentials -UserName $currentUser -Domain $currentDomain -Password $plainPassword
+    $autologonExe = Get-AutologonExe
     & $autologonExe /AcceptEula $currentUser $currentDomain $plainPassword 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Autologon.exe exited with code $LASTEXITCODE." }
     if ((Get-WinlogonProperty -Name "AutoAdminLogon") -ne "1") {

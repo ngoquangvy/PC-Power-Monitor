@@ -12,6 +12,8 @@
 /telegram-send-*.py
 *.log
 *.tmp
+/Autologon.exe
+/Autologon.exe.tmp
 
 # Installer migration markers
 /.telegram-*-config-created
