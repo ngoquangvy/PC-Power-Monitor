@@ -112,7 +112,11 @@ Sau khi chạy **Install / repair tasks**, bot chỉ nhận các lệnh cố đ�
 ```text
 /help
 /health
+/keep_awake
+/allow_sleep
+/auto_keep_awake
 /restart_tailscale
+/tailscale_login
 /restart_pc
 /confirm_restart
 /cancel_restart
@@ -123,6 +127,27 @@ Sau khi chạy **Install / repair tasks**, bot chỉ nhận các lệnh cố đ�
 ```
 
 `/help` trả về danh sách lệnh. Các tin startup/resume chỉ nhắc `Remote recovery: send /help` để dễ đọc. `/health` trả về uptime, RAM trống, trạng thái Tailscale và các task của app. `/restart_tailscale` chạy ẩn dưới quyền SYSTEM, chỉ restart dịch vụ Windows `Tailscale`, chờ trạng thái kết nối rồi trả kết quả vào chính Telegram. Restart Windows luôn cần hai bước: gửi `/restart_pc`, rồi `/confirm_restart` trong vòng 2 phút; máy restart sau 45 giây và có thể hủy bằng `/cancel_restart`. `/lock_screen` chỉ khóa phiên Windows đã đăng nhập. `/wake_display` chỉ giả lập một chuyển động chuột rất nhỏ để đánh thức màn hình và reset bộ đếm idle; nó không mở khóa hay bypass mật khẩu Windows. Bot trả xác nhận khi task được nhận, còn kết quả thực tế được ghi local log. Bot không nhận lệnh PowerShell tùy ý, không mở port vào Internet và bỏ qua mọi lệnh tồn đọng trước thời điểm listener được cài. Khi máy sleep/hibernate hoặc mất Internet, lệnh này không thể đến máy; nó chỉ là kênh phục hồi khi app vẫn gửi/nhận Telegram nhưng Tailscale bị lỗi.
+
+### Đăng nhập lại Tailscale từ xa
+
+- `/health` cho biết trạng thái Tailscale và ngày hết hạn khóa thiết bị nếu client cung cấp.
+- Khi Tailscale báo `NeedsLogin`, listener gửi một cảnh báo cho mỗi lần mất xác thực. Gửi `/tailscale_login` trong chat riêng đã cấu hình để nhận link xác thực chính thức. Lệnh dùng lại link đang chờ hoặc yêu cầu Tailscale trên PC tạo link mới. Không lưu link trong log/state, không cần nhập mật khẩu hay auth key vào Telegram.
+- Mở link trên điện thoại hoặc máy khác, đăng nhập đúng tài khoản Tailscale và duyệt thiết bị Windows. Nếu tailnet yêu cầu duyệt thiết bị, hoàn tất trong admin console rồi kiểm tra lại bằng `/health`.
+
+Khi Tailscale đang chạy bình thường, lệnh chỉ trả trạng thái. Nó không logout, không ép xác thực lại và không đổi profile hoặc cấu hình mạng. Máy phải còn thức, có Internet và listener Telegram đang chạy; lệnh không thể đánh thức máy đã sleep.
+
+## Giữ máy thức qua Telegram
+
+- `/auto_keep_awake`: chế độ mặc định. Tự giữ thức khi có ít nhất một phiên RDP Active và tiếp tục giữ thức đủ **2 giờ sau khi tất cả phiên RDP ngắt**. RDP kết nối lại sẽ hủy bộ đếm; lần ngắt tiếp theo bắt đầu lại 2 giờ. Tailscale online không được coi là đang remote.
+- `/keep_awake`: bật giữ thức liên tục, kể cả khi không có RDP. Màn hình vẫn được tắt và khóa bình thường.
+- `/allow_sleep`: tắt giữ thức và tắt tự động giữ thức theo RDP. Dùng `/auto_keep_awake` để quay về tự động.
+- `/health`: xem yêu cầu giữ thức có đang hoạt động không.
+
+Chế độ được lưu trong ProgramData và khôi phục khi listener khởi động, kể cả sau restart máy. App kiểm tra phiên RDP qua Windows WTS API giữa các lần poll Telegram (thông thường khoảng 25 giây). Nếu query lỗi trong Auto, app giữ thức và thử lại; khi query phục hồi nhưng RDP đã ngắt, bắt đầu một khoảng 2 giờ mới. Khoảng chờ dùng đồng hồ đơn điệu, không phụ thuộc việc chỉnh giờ Windows. `/health` hiển thị số giây còn lại.
+
+Khi listener khởi động lại mà không có RDP, Auto bắt đầu lại đủ 2 giờ để tránh sleep sớm. App giữ yêu cầu nguồn liên tục trong khoảng này, thay vì trông chờ reset idle timer của Windows. Chỉ sau khi hết hạn app mới bỏ yêu cầu; Windows có thể sleep ngay hoặc muộn hơn tùy power policy và hoạt động khác. Đây không phải lịch shutdown.
+
+Yêu cầu giữ thức chỉ tồn tại khi listener chạy; disable task, dừng tiến trình hoặc uninstall sẽ giải phóng nó. Không thay đổi power plan hay registry. Sleep/shutdown thủ công vẫn hoạt động; Windows có thể ưu tiên chính sách nguồn hoặc pin yếu. Khi máy đã sleep hoặc mất mạng, bot không thể nhận lệnh mới. Cơ chế tự động này nhận diện RDP, không nhận diện AnyDesk/RustDesk hay các công cụ chia sẻ màn hình khác.
 
 ## Windows AutoLogon (Tùy chọn)
 
